@@ -100,6 +100,7 @@ public final class MainActivity extends Activity {
     private String pendingLink;
     private ListView list;
     private PullToRefresh feed;
+    private int categoryScrollX;
     private VideoCard playingCard;
     private boolean renderPending;
     private boolean refreshInFlight;
@@ -364,6 +365,7 @@ public final class MainActivity extends Activity {
         int first = list == null ? 0 : list.getFirstVisiblePosition();
         View top = list == null ? null : list.getChildAt(0);
         int offset = top == null ? 0 : top.getTop();
+        int categoryOffset = categoryScrollX;
         resetBody();
         body.setPadding(0, dp(12), 0, 0);
         var controls = vertical();
@@ -408,7 +410,11 @@ public final class MainActivity extends Activity {
             all.add(video);
             available.addAll(effectiveTags(video));
         }
-        if (filter != null && !showChannels && !available.contains(filter)) filter = null;
+        if (filter != null && !showChannels && !available.contains(filter)) {
+            filter = null;
+            categoryOffset = 0;
+        }
+        categoryScrollX = categoryOffset;
         var chips = new HorizontalScrollView(this);
         chips.setHorizontalScrollBarEnabled(false);
         var row = new LinearLayout(this);
@@ -422,8 +428,16 @@ public final class MainActivity extends Activity {
         }
         if (!showFavorites) addChip(row, "Каналы", CHANNELS);
         controls.addView(chips);
+        chips.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View view, int left, int top, int right, int bottom,
+                                                 int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                chips.removeOnLayoutChangeListener(this);
+                chips.scrollTo(categoryScrollX, 0);
+                categoryScrollX = chips.getScrollX();
+                chips.setOnScrollChangeListener((scroller, x, y, oldX, oldY) -> categoryScrollX = x);
+            }
+        });
         if (showChannels) {
-            chips.post(() -> chips.scrollTo(row.getWidth(), 0));
             if (channelFeed == null) renderChannels();
             else channelFeed.render(controls, first, offset);
             return;
@@ -616,6 +630,7 @@ public final class MainActivity extends Activity {
         filter = null;
         playback.close();
         list = null;
+        categoryScrollX = 0;
         renderLibrary();
     }
 
@@ -644,7 +659,8 @@ public final class MainActivity extends Activity {
     }
 
     private void addChip(LinearLayout row, String name, String id) {
-        var chip = button(name, java.util.Objects.equals(filter, id), () -> {
+        boolean selected = java.util.Objects.equals(filter, id);
+        var chip = button(name, selected, () -> {
             if (CHANNELS.equals(id) && CHANNELS.equals(filter) && channelFeed != null) {
                 closeChannel();
                 return;
@@ -655,6 +671,7 @@ public final class MainActivity extends Activity {
             list = null;
             renderLibrary();
         });
+        chip.setSelected(selected);
         var params = new LinearLayout.LayoutParams(-2, -2);
         params.setMarginEnd(dp(6));
         row.addView(chip, params);
@@ -1286,7 +1303,10 @@ public final class MainActivity extends Activity {
                     current.dismiss();
                 } else {
                     closeDialog();
-                    if (original == null) filter = null;
+                    if (original == null) {
+                        filter = null;
+                        categoryScrollX = 0;
+                    }
                 }
                 refresh();
                 toast(original == null ? "Видео добавлено" : "Видео изменено");
@@ -1452,6 +1472,7 @@ public final class MainActivity extends Activity {
         root.removeAllViews();
         list = null;
         feed = null;
+        categoryScrollX = 0;
         body = vertical();
         body.setPadding(dp(20), dp(12), dp(20), 0);
         root.addView(body, new FrameLayout.LayoutParams(-1, -1));
@@ -1782,6 +1803,7 @@ public final class MainActivity extends Activity {
         else if (session != null && CHANNELS.equals(filter)) {
             filter = null;
             list = null;
+            categoryScrollX = 0;
             renderLibrary();
         } else if (session != null && showFavorites) toggleFavoritesFeed();
         else super.onBackPressed();

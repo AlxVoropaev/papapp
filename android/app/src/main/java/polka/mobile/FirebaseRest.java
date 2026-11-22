@@ -11,8 +11,10 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -68,8 +70,24 @@ final class FirebaseRest {
     }
 
     JSONObject pairing(String operation, JSONObject data, boolean authorize) throws Exception {
-        return request(pairingServer + "/pairing/" + operation, "POST", data.toString(),
-                "application/json", authorize ? idToken() : null, null, origin);
+        URI url = URI.create(pairingServer + "/pairing/" + operation);
+        String body = data.toString();
+        String bearer = authorize ? idToken() : null;
+        try {
+            return request(url.toString(), "POST", body, "application/json", bearer, null, origin);
+        } catch (UnknownHostException error) {
+            // DNS failed before the POST reached the server.
+            IOException failure = error;
+            for (String address : PairingDns.resolve(url.getHost())) {
+                var connection = PairingDns.open(url, address);
+                try {
+                    return request(connection, "POST", body, "application/json", bearer, null, origin);
+                } catch (ConnectException unavailable) {
+                    failure = unavailable;
+                }
+            }
+            throw failure;
+        }
     }
 
     void signIn(String email, String password, boolean create) throws Exception {
@@ -240,7 +258,12 @@ final class FirebaseRest {
 
     private static JSONObject request(String url, String method, String body, String contentType,
                                       String bearer, String referer, String origin) throws IOException, JSONException {
-        var connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+        return request((HttpURLConnection) URI.create(url).toURL().openConnection(), method,
+                body, contentType, bearer, referer, origin);
+    }
+
+    private static JSONObject request(HttpURLConnection connection, String method, String body, String contentType,
+                                      String bearer, String referer, String origin) throws IOException, JSONException {
         try {
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(5000);

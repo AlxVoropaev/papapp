@@ -79,6 +79,7 @@ public final class MainActivity extends Activity {
     private FrameLayout root;
     private LinearLayout body;
     private AlertDialog dialog;
+    private AlertDialog playlistDialog;
     private TextView dialogError;
     private ApkUpdateController apkUpdates;
     private CatalogBackend cloudBackend;
@@ -714,13 +715,27 @@ public final class MainActivity extends Activity {
     }
 
     private void videoForm(JSONObject video, String shared) {
+        videoForm(video, shared, null, null);
+    }
+
+    private void videoForm(JSONObject video, String shared, PlaylistFeed playlist, PlaylistEntry entry) {
         if (!parent()) return;
         var panel = formPanel();
-        var editor = new VideoEditor(panel, video, shared);
+        if (video == null && shared == null && playlist == null) {
+            panel.addView(button("Из плейлиста YouTube", false, () -> new PlaylistFeed().open()));
+        }
+        var restore = playlist == null ? null : playlist.rememberPosition();
+        var editor = new VideoEditor(panel, video, shared, playlist, entry);
         var current = showForm(video == null ? "Добавить видео" : "Редактировать видео", panel,
-            video == null ? "Добавить на полку" : "Сохранить", editor::save);
+            video == null && playlist == null ? "Добавить на полку" : "Сохранить", editor::save, playlist != null);
         editor.owner = current;
-        if (shared != null) {
+        if (playlist != null) {
+            current.setOnDismissListener(ignored -> {
+                dialogDismissed(current);
+                if (dialog == playlist.owner) restore.run();
+            });
+            editor.suggestTags();
+        } else if (shared != null) {
             getPreferences(MODE_PRIVATE).edit().remove("pendingShare").putString("activeShare", shared).apply();
             current.setOnDismissListener(ignored -> {
                 getPreferences(MODE_PRIVATE).edit().remove("activeShare").apply();
@@ -730,8 +745,152 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private record PlaylistEntry(String id, String title) {}
+
+    private final class PlaylistFeed {
+        final LinearLayout panel = formPanel();
+        final EditText url = field(panel, "Ссылка на плейлист YouTube", "", InputType.TYPE_TEXT_VARIATION_URI, 2048, true);
+        final TextView feedback = label("", 14, MUTED);
+        final ListView feed = new ListView(MainActivity.this);
+        final Button more = button("Загрузить ещё", false, () -> load(false));
+        final List<PlaylistEntry> entries = new ArrayList<>();
+        final Set<String> listed = new LinkedHashSet<>();
+        final Set<String> saved = new LinkedHashSet<>();
+        final BaseAdapter adapter = new BaseAdapter() {
+            @Override public int getCount() { return entries.size(); }
+            @Override public PlaylistEntry getItem(int position) { return entries.get(position); }
+            @Override public long getItemId(int position) { return position; }
+            @Override public View getView(int position, View recycled, ViewGroup parent) {
+                var row = recycled instanceof PlaylistRow existing ? existing : new PlaylistRow();
+                row.bind(getItem(position));
+                return row;
+            }
+        };
+        AlertDialog owner;
+        String loadedUrl = "";
+        String nextPage = "";
+
+        void open() {
+            for (int i = 0; i < videos.length(); i++) {
+                JSONObject video = videos.optJSONObject(i);
+                if (video != null) saved.add(videoId(video));
+            }
+            feedback.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+            feedback.setVisibility(View.GONE);
+            feed.setAdapter(adapter);
+            feed.setVisibility(View.GONE);
+            panel.addView(feed, new LinearLayout.LayoutParams(-1,
+                dp(Math.min(400, getResources().getConfiguration().screenHeightDp / 2))));
+            panel.addView(feedback);
+            more.setVisibility(View.GONE);
+            panel.addView(more);
+            owner = openDialog("Плейлист YouTube", panel, "Показать видео", (current, error) -> load(true), null, false);
+            playlistDialog = owner;
+        }
+
+        void load(boolean first) {
+            String link = first ? value(url).trim() : loadedUrl;
+            if (link.isEmpty()) {
+                url.setError("Вставьте ссылку на плейлист YouTube");
+                return;
+            }
+            var keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+            keyboard.hideSoftInputFromWindow(url.getWindowToken(), 0);
+            url.clearFocus();
+            var show = owner.getButton(AlertDialog.BUTTON_POSITIVE);
+            show.setEnabled(false);
+            more.setEnabled(false);
+            feedback.setText("Загружаем видео…");
+            feedback.setVisibility(View.VISIBLE);
+            var input = json("url", link, "pageToken", first ? "" : nextPage);
+            var backend = cloudBackend;
+            var local = localBackend;
+            var origin = endpoint;
+            run(previews, () -> {
+                if (local != null) return local.request("playlist", "POST", input);
+                if (!metadata.hasCloudSuggestions(origin)) throw new VideoMetadata.Failure("Загрузка плейлистов пока не настроена.");
+                return metadata.fetchPlaylist(input, backend.idToken());
+            }, (result, error) -> {
+                if (playlistDialog != owner) return;
+                show.setEnabled(true);
+                more.setEnabled(true);
+                if (error != null) {
+                    feedback.setText(error instanceof VideoMetadata.Failure ? error.getMessage() : message(error));
+                    return;
+                }
+                if (first) {
+                    entries.clear();
+                    listed.clear();
+                    loadedUrl = link;
+                }
+                var page = array(result, "videos");
+                for (int i = 0; i < page.length(); i++) {
+                    var item = page.optJSONObject(i);
+                    if (item == null) continue;
+                    String id = videoId(item);
+                    String title = item.optString("title");
+                    if (id != null && !title.isEmpty() && listed.add(id)) entries.add(new PlaylistEntry(id, title));
+                }
+                nextPage = result.optString("nextPageToken");
+                adapter.notifyDataSetChanged();
+                if (first) feed.setSelection(0);
+                feed.setVisibility(entries.isEmpty() ? View.GONE : View.VISIBLE);
+                more.setVisibility(nextPage.isEmpty() ? View.GONE : View.VISIBLE);
+                feedback.setText(nextPage.isEmpty() ? "В плейлисте нет доступных видео." : "На этой странице нет доступных видео.");
+                feedback.setVisibility(entries.isEmpty() ? View.VISIBLE : View.GONE);
+            });
+        }
+
+        Runnable rememberPosition() {
+            int first = feed.getFirstVisiblePosition();
+            View top = feed.getChildAt(0);
+            int offset = top == null ? 0 : top.getTop() - feed.getPaddingTop();
+            return () -> feed.setSelectionFromTop(first, offset);
+        }
+
+        private final class PlaylistRow extends LinearLayout {
+            final ImageView thumbnail = new ImageView(MainActivity.this);
+            final TextView title = label("", 15, INK);
+            final ImageButton add = iconButton(R.drawable.ic_add, "Добавить видео", 12, this::addVideo);
+            PlaylistEntry entry;
+
+            PlaylistRow() {
+                super(MainActivity.this);
+                setPadding(0, dp(8), 0, dp(8));
+                setGravity(Gravity.CENTER_VERTICAL);
+                thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                thumbnail.setBackgroundColor(LIGHT_GREEN);
+                thumbnail.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                addView(thumbnail, new LinearLayout.LayoutParams(dp(76), dp(44)));
+                title.setPadding(dp(10), 0, 0, 0);
+                title.setMaxLines(3);
+                title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+                addView(add, new LinearLayout.LayoutParams(dp(48), dp(48)));
+            }
+
+            void bind(PlaylistEntry item) {
+                if (!item.id().equals(thumbnail.getTag())) loadThumbnail(item.id(), thumbnail);
+                entry = item;
+                title.setText(item.title());
+                boolean exists = saved.contains(item.id());
+                add.setImageResource(exists ? R.drawable.ic_check : R.drawable.ic_add);
+                add.setEnabled(!exists);
+                add.setAlpha(exists ? .45f : 1);
+                String action = exists ? "Уже на полке: " : "Добавить: ";
+                add.setContentDescription(action + item.title());
+                add.setTooltipText(action + item.title());
+            }
+
+            void addVideo() {
+                if (dialog == owner) videoForm(null, null, PlaylistFeed.this, entry);
+            }
+        }
+    }
+
     private final class VideoEditor {
         final JSONObject original;
+        final PlaylistFeed playlist;
         final EditText url;
         final EditText title;
         final EditText note;
@@ -753,15 +912,22 @@ public final class MainActivity extends Activity {
         boolean fillingTags;
         boolean aiSuggestions;
 
-        VideoEditor(LinearLayout panel, JSONObject video, String shared) {
+        VideoEditor(LinearLayout panel, JSONObject video, String shared, PlaylistFeed playlist, PlaylistEntry entry) {
             original = video;
-            url = video == null ? field(panel, "Ссылка на YouTube", shared == null ? "" : shared,
+            this.playlist = playlist;
+            String link = entry != null ? "https://www.youtube.com/watch?v=" + entry.id() : shared;
+            url = video == null ? field(panel, "Ссылка на YouTube", link == null ? "" : link,
                 InputType.TYPE_TEXT_VARIATION_URI, 2048, true) : null;
-            title = field(panel, "Название", video == null ? "" : video.optString("title"), 0, 160, false);
+            title = field(panel, "Название", entry != null ? entry.title() : video == null ? "" : video.optString("title"),
+                0, 160, false);
             titleStatus = label("", 14, MUTED);
             titleRetry = button("Повторить загрузку названия", false, this::loadTitle);
             titleRetry.setVisibility(View.GONE);
             if (url != null) {
+                if (entry != null) {
+                    automaticTitle = value(title);
+                    titleStatus.setText("Название получено с YouTube. Его можно изменить.");
+                }
                 panel.addView(titleStatus);
                 panel.addView(titleRetry);
                 watchText(url, this::scheduleLookup);
@@ -898,7 +1064,8 @@ public final class MainActivity extends Activity {
 
         void save(AlertDialog current, TextView error) {
             String name = original == null ? VideoMetadata.normalizeTitle(value(title)) : value(title).trim();
-            if (url != null && VideoMetadata.youtubeId(value(url)) == null) {
+            String id = url == null ? null : VideoMetadata.youtubeId(value(url));
+            if (url != null && id == null) {
                 url.setError("Вставьте ссылку на видео YouTube");
                 return;
             }
@@ -907,11 +1074,17 @@ public final class MainActivity extends Activity {
                 return;
             }
             var data = json("title", name, "note", value(note).trim(), "categories", selectedTags());
-            if (url != null) put(data, "url", "https://www.youtube.com/watch?v=" + VideoMetadata.youtubeId(value(url)));
+            if (url != null) put(data, "url", "https://www.youtube.com/watch?v=" + id);
             String path = original == null ? "videos" : "videos/" + original.optString("id");
             submit(current, error, () -> request(path, original == null ? "POST" : "PATCH", data), result -> {
-                closeDialog();
-                if (original == null) filter = null;
+                if (playlist != null) {
+                    playlist.saved.add(id);
+                    playlist.adapter.notifyDataSetChanged();
+                    current.dismiss();
+                } else {
+                    closeDialog();
+                    if (original == null) filter = null;
+                }
                 refresh();
                 toast(original == null ? "Видео добавлено" : "Видео изменено");
             });
@@ -1194,16 +1367,26 @@ public final class MainActivity extends Activity {
     }
 
     private AlertDialog showForm(String heading, LinearLayout panel, String positive, FormAction action) {
-        playback.close();
-        closeDialog();
+        return showForm(heading, panel, positive, action, false);
+    }
+
+    private AlertDialog showForm(String heading, LinearLayout panel, String positive, FormAction action,
+                                 boolean overPlaylist) {
         var error = label("", 14, ERROR);
         error.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         error.setVisibility(View.GONE);
         panel.addView(error);
         var scroll = new ScrollView(this);
         scroll.addView(panel);
+        return openDialog(heading, scroll, positive, action, error, overPlaylist);
+    }
+
+    private AlertDialog openDialog(String heading, View content, String positive, FormAction action,
+                                   TextView error, boolean overPlaylist) {
+        playback.close();
+        if (!overPlaylist) closeDialog();
         var builder = new AlertDialog.Builder(this)
-            .setTitle(heading).setView(scroll).setNegativeButton("Закрыть", null);
+            .setTitle(heading).setView(content).setNegativeButton("Закрыть", null);
         if (positive != null) builder.setPositiveButton(positive, null);
         var current = builder.create();
         dialog = current;
@@ -1222,7 +1405,8 @@ public final class MainActivity extends Activity {
 
     private void dialogDismissed(AlertDialog current) {
         if (dialog == current) {
-            dialog = null;
+            if (playlistDialog == current) playlistDialog = null;
+            dialog = playlistDialog;
             dialogError = null;
             handler.post(deliver);
             apkUpdates.reconsider();
@@ -1232,9 +1416,12 @@ public final class MainActivity extends Activity {
     private void closeDialog() {
         if (dialog == null) return;
         var closing = dialog;
+        var playlist = playlistDialog;
         dialog = null;
+        playlistDialog = null;
         dialogError = null;
         closing.dismiss();
+        if (playlist != null && playlist != closing) playlist.dismiss();
         handler.post(deliver);
         apkUpdates.reconsider();
     }
@@ -1417,10 +1604,9 @@ public final class MainActivity extends Activity {
         playback.close();
         apkUpdates.destroy();
         handler.removeCallbacksAndMessages(null);
-        if (dialog != null) {
-            dialog.setOnDismissListener(null);
-            dialog.dismiss();
-        }
+        if (dialog != null) dialog.setOnDismissListener(null);
+        if (playlistDialog != null) playlistDialog.setOnDismissListener(null);
+        closeDialog();
         catalogQueue.shutdownNow();
         previews.shutdownNow();
         images.shutdownNow();

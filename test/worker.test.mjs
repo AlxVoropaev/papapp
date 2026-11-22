@@ -9,6 +9,59 @@ function token(extra = {}) {
     sub: 'parent', exp: Date.now() / 1000 + 3600, firebase: { sign_in_provider: 'password' }, ...extra })).toString('base64url') + '.signature';
 }
 
+test('playlist pages require a verified parent and preserve available video order', async () => {
+  const pages = [];
+  const worker = createWorker({ fetcher: async (url, options) => {
+    if (String(url).startsWith('https://firestore.googleapis.com/')) {
+      return new Response(null, { status: options.headers.Authorization.endsWith('.forged') ? 403 : 200 });
+    }
+    assert.equal(url.origin + url.pathname, 'https://www.googleapis.com/youtube/v3/playlistItems');
+    assert.equal(url.searchParams.get('playlistId'), 'PL_example');
+    assert.deepEqual(options.headers, { 'X-Goog-Api-Key': 'youtube-test-key', Accept: 'application/json' });
+    assert.equal(options.redirect, 'error');
+    const pageToken = url.searchParams.get('pageToken');
+    pages.push(pageToken);
+    const item = (videoId, title, privacyStatus = 'public') => ({
+      contentDetails: { videoId }, snippet: { title }, status: { privacyStatus }
+    });
+    return Response.json(pageToken ? { items: [item('M7lc1UVf-VE', 'Третье видео')] } : {
+      items: [
+        item('aBcDeFgHiJ1', 'Первое видео #тема'),
+        item('aBcDeFgHiJ2', 'Deleted video'),
+        item('aBcDeFgHiJ3', 'Закрытое видео', 'private'),
+        item('aBcDeFgHiJ4', 'Второе видео', 'unlisted')
+      ],
+      nextPageToken: 'next/+='
+    });
+  } });
+  const env = {
+    ALLOWED_ORIGINS: origin, FIREBASE_PROJECT_ID: project, YOUTUBE_API_KEY: 'youtube-test-key',
+    QUOTA: { idFromName: id => id, get: id => {
+      assert.equal(id, 'youtube-playlist:parent');
+      return { fetch: async () => new Response(null, { status: 204 }) };
+    } }
+  };
+  const link = 'https://youtu.be/aBcDeFgHiJ1?list=PL_example';
+  const call = (input, jwt = token(), config = env) => worker.fetch(new Request('https://tags.example/playlist', {
+    method: 'POST', headers: { Origin: origin, Authorization: 'Bearer ' + jwt }, body: JSON.stringify(input)
+  }), config);
+
+  assert.equal((await call({ url: link }, token({ firebase: { sign_in_provider: 'anonymous' } }))).status, 401);
+  assert.equal((await call({ url: link }, token().replace('.signature', '.forged'))).status, 403);
+  assert.equal((await call({ url: link }, token(), { ...env, YOUTUBE_API_KEY: undefined })).status, 503);
+  assert.equal((await call({ url: 'https://www.youtube.com.example.org/playlist?list=PL_example' })).status, 400);
+  assert.equal((await call({ url: link, pageToken: [] })).status, 400);
+  assert.deepEqual(pages, []);
+  assert.deepEqual(await (await call({ url: link })).json(), {
+    videos: [{ id: 'aBcDeFgHiJ1', title: 'Первое видео' }, { id: 'aBcDeFgHiJ4', title: 'Второе видео' }],
+    nextPageToken: 'next/+='
+  });
+  assert.deepEqual(await (await call({ url: link, pageToken: 'next/+=' })).json(), {
+    videos: [{ id: 'M7lc1UVf-VE', title: 'Третье видео' }], nextPageToken: ''
+  });
+  assert.deepEqual(pages, [null, 'next/+=']);
+});
+
 test('short invitations require a verified parent and rate-limit guesses across clients', async () => {
   const invite = 'A'.repeat(24);
   let saved;

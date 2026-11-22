@@ -43,6 +43,91 @@ export function normalizeYoutubeTitle(value) {
     .slice(0, 160);
 }
 
+export class YoutubePlaylistError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function playlistId(input) {
+  if (typeof input !== 'string' || input.length > 2048) return null;
+  try {
+    const link = input.trim();
+    const url = new URL(/^https?:\/\//i.test(link) ? link : 'https://' + link);
+    if (!['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com', 'youtu.be'].includes(url.hostname)
+        || url.username || url.password || url.port) return null;
+    const id = url.searchParams.get('list');
+    return id && /^[\w-]{2,150}$/.test(id) ? id : null;
+  } catch { return null; }
+}
+
+async function youtubeData(resource, params, apiKey, fetcher, messages) {
+  if (!apiKey) throw new YoutubePlaylistError(503, messages.unconfigured);
+  const url = new URL('https://www.googleapis.com/youtube/v3/' + resource);
+  url.search = new URLSearchParams(params);
+  try {
+    const response = await fetcher(url, {
+      headers: { 'X-Goog-Api-Key': apiKey, Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(5000)
+    });
+    const page = await response.json();
+    if (!response.ok) {
+      const reason = page.error?.errors?.[0]?.reason;
+      if (response.status === 404 || ['playlistItemsNotAccessible', 'playlistOperationUnsupported'].includes(reason)) {
+        throw new YoutubePlaylistError(404, messages.missing);
+      }
+      if (reason === 'invalidPageToken') throw new YoutubePlaylistError(400, messages.retry);
+      if (reason === 'quotaExceeded' || response.status === 429) {
+        throw new YoutubePlaylistError(429, 'Достигнут лимит запросов к YouTube. Попробуйте позже.');
+      }
+      throw new YoutubePlaylistError(502, messages.unavailable);
+    }
+    if (!Array.isArray(page?.items) || page.items.length > 50) throw new YoutubePlaylistError(502, messages.unavailable);
+    return page;
+  } catch (error) {
+    if (error instanceof YoutubePlaylistError) throw error;
+    throw new YoutubePlaylistError(502, messages.unavailable);
+  }
+}
+
+const playlistMessages = {
+  unconfigured: 'Загрузка плейлистов пока не настроена.',
+  missing: 'Плейлист недоступен. Проверьте ссылку и доступ к нему.',
+  retry: 'Откройте плейлист заново.',
+  unavailable: 'Не удалось загрузить плейлист с YouTube. Попробуйте ещё раз.'
+};
+export async function youtubePlaylist(input, apiKey, fetcher = fetch) {
+  const id = playlistId(input?.url);
+  if (!id) throw new YoutubePlaylistError(400, 'Вставьте ссылку на плейлист YouTube.');
+  return playlistPage(id, input?.pageToken ?? '', apiKey, fetcher, playlistMessages);
+}
+
+async function playlistPage(id, pageToken, apiKey, fetcher, messages) {
+  if (typeof pageToken !== 'string' || pageToken.length > 512) throw new YoutubePlaylistError(400, messages.retry);
+  const params = {
+    part: 'snippet,contentDetails,status',
+    fields: 'nextPageToken,items(snippet(title),contentDetails(videoId),status(privacyStatus))',
+    playlistId: id,
+    maxResults: '50'
+  };
+  if (pageToken) params.pageToken = pageToken;
+  const page = await youtubeData('playlistItems', params, apiKey, fetcher, messages);
+  const videos = [];
+  for (const item of page.items) {
+    const id = item?.contentDetails?.videoId;
+    const rawTitle = item?.snippet?.title;
+    const privacy = item?.status?.privacyStatus;
+    if (!validId(id) || privacy === 'private'
+        || typeof rawTitle !== 'string' || /^(?:deleted|private) video$/i.test(rawTitle.trim())) continue;
+    const title = normalizeYoutubeTitle(rawTitle) || rawTitle.trim().slice(0, 160);
+    if (title) videos.push({ id, title });
+  }
+  const nextPageToken = page.nextPageToken;
+  return { videos, nextPageToken: typeof nextPageToken === 'string' && nextPageToken !== pageToken
+    && nextPageToken.length <= 512 ? nextPageToken : '' };
+}
+
 async function fetchTitle(url, timeoutMs, { signal, fetcher }) {
   signal?.throwIfAborted();
   const controller = new AbortController();

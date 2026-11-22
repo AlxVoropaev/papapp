@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { normalizeYoutubeTitle, youtubeId, youtubeTitle } from './youtube.mjs';
+import { normalizeYoutubeTitle, youtubeId, youtubeTitle, youtubePlaylist, YoutubePlaylistError } from './youtube.mjs';
 import { categoryList, validCategoryName, selectedTags } from './catalog.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -15,7 +15,7 @@ const secret = () => randomBytes(32).toString('base64url');
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
 
-export function createApp({ databasePath = join(root, 'data', 'library.sqlite'), production = false, publicOrigin = '', setupKey = '', metadata = true, now = Date.now } = {}) {
+export function createApp({ databasePath = join(root, 'data', 'library.sqlite'), production = false, publicOrigin = '', setupKey = '', metadata = true, youtubeApiKey = process.env.YOUTUBE_API_KEY, now = Date.now } = {}) {
   if (production && (!/^https:\/\//.test(publicOrigin) || !setupKey)) throw new Error('Production requires HTTPS PUBLIC_ORIGIN and SETUP_KEY.');
   if (databasePath !== ':memory:') mkdirSync(dirname(databasePath), { recursive: true });
   const db = new DatabaseSync(databasePath);
@@ -155,6 +155,11 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
         session(req, true);
         return json(res, 200, { enabled: false });
       }
+      if (path === '/api/playlist' && req.method === 'POST') {
+        session(req, true);
+        throttle(req, 'playlist', 20);
+        return json(res, 200, await youtubePlaylist(await body(req), youtubeApiKey));
+      }
       if (path === '/api/categories' && req.method === 'GET') {
         return json(res, 200, { categories: categoryRows(session(req).family) });
       }
@@ -244,7 +249,7 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
       }
       fail(404, 'Страница не найдена.');
     } catch (e) {
-      if (!(e instanceof HttpError)) console.error('Request failed:', e.message);
+      if (!(e instanceof HttpError || e instanceof YoutubePlaylistError)) console.error('Request failed:', e.message);
       if (!res.headersSent) json(res, e.status ?? 500, { error: e.status ? e.message : 'Ошибка сервера. Попробуйте ещё раз.' });
       else res.end();
     }

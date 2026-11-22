@@ -1,5 +1,5 @@
 import { categoryList } from '../server/catalog.mjs';
-import { normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl } from '../server/youtube.mjs';
+import { normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'openrouter/free';
@@ -87,13 +87,18 @@ export function parseIdentity(token, project, now = Date.now()) {
   } catch { throw new HttpError(401, 'Войдите как родитель.'); }
 }
 
-async function authorizedCategories(token, project, fetcher) {
+async function authorizeFamily(token, project, fetcher) {
   const uid = parseIdentity(token, project);
   const base = 'https://firestore.googleapis.com/v1/projects/' + project + '/databases/(default)/documents/families/' + encodeURIComponent(uid);
   const options = { headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(5000) };
   const family = await fetcher(base, options);
   if (!family.ok) throw new HttpError(family.status === 403 || family.status === 401 || family.status === 404 ? 403 : 503, 'Не удалось подтвердить доступ к полке.');
   await family.body?.cancel();
+  return { uid, base, options };
+}
+
+async function authorizedCategories(token, project, fetcher) {
+  const { uid, base, options } = await authorizeFamily(token, project, fetcher);
   const records = [];
   let pageToken = '';
   do {
@@ -274,7 +279,8 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
         }
       }
       const pairingRequest = url.pathname === '/pairing/issue' || url.pathname === '/pairing/resolve';
-      if (url.pathname !== '/suggest' && !pairingRequest) return json({ error: 'Не найдено.' }, 404);
+      const playlistRequest = url.pathname === '/playlist';
+      if (url.pathname !== '/suggest' && !pairingRequest && !playlistRequest) return json({ error: 'Не найдено.' }, 404);
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
         ...cors, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '3600'
       } });
@@ -286,6 +292,21 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
         } catch (error) {
           return json({ error: error instanceof HttpError ? error.message : 'Сервис подключения временно недоступен.' },
             error instanceof HttpError ? error.status : 503);
+        }
+      }
+      if (playlistRequest) {
+        try {
+          const token = request.headers.get('Authorization')?.match(/^Bearer (.+)$/)?.[1];
+          const { uid } = await authorizeFamily(token, env.FIREBASE_PROJECT_ID, fetcher);
+          let input;
+          try { input = await boundedJson(request, 8192); } catch { throw new HttpError(400, 'Некорректный запрос.'); }
+          if (!env.YOUTUBE_API_KEY || !env.QUOTA) throw new HttpError(503, 'Загрузка плейлистов пока не настроена.');
+          const quota = env.QUOTA.get(env.QUOTA.idFromName('youtube-playlist:' + uid));
+          if (!(await quota.fetch('https://quota/check')).ok) throw new HttpError(429, 'Слишком много запросов к плейлистам. Попробуйте позже.');
+          return json(await youtubePlaylist(input, env.YOUTUBE_API_KEY, fetcher));
+        } catch (error) {
+          const known = error instanceof HttpError || error instanceof YoutubePlaylistError;
+          return json({ error: known ? error.message : 'Загрузка плейлистов временно недоступна.' }, known ? error.status : 503);
         }
       }
       try {

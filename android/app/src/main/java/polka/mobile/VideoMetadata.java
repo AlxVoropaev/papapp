@@ -128,6 +128,15 @@ final class VideoMetadata {
         }
     }
 
+    JSONObject fetchPlaylist(JSONObject input, String idToken) throws IOException {
+        if (tagsEndpoint == null) throw new Failure("Загрузка плейлистов пока не настроена.");
+        return request(tagsEndpoint.resolve("/playlist"), tagsOrigin, idToken, input, 15000, 65536);
+    }
+
+    static final class Failure extends IOException {
+        Failure(String message) { super(message); }
+    }
+
     static List<String> suggestTags(String title, JSONArray categories) {
         List<String> tokens = words(title);
         ArrayList<Suggestion> suggestions = new ArrayList<>();
@@ -243,8 +252,9 @@ final class VideoMetadata {
                 try (var output = connection.getOutputStream()) { output.write(bytes); }
             }
             int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) throw new IOException("HTTP " + status);
-            try (InputStream input = connection.getInputStream()) {
+            boolean ok = status >= 200 && status < 300;
+            try (InputStream input = ok ? connection.getInputStream() : connection.getErrorStream()) {
+                if (input == null) throw new IOException("HTTP " + status);
                 ByteArrayOutputStream data = new ByteArrayOutputStream();
                 byte[] buffer = new byte[4096];
                 int read;
@@ -253,7 +263,9 @@ final class VideoMetadata {
                     if (data.size() + read > maxBytes) throw new IOException("Metadata response too large");
                     data.write(buffer, 0, read);
                 }
-                return new JSONObject(new String(data.toByteArray(), StandardCharsets.UTF_8));
+                var response = new JSONObject(new String(data.toByteArray(), StandardCharsets.UTF_8));
+                if (!ok) throw new Failure(response.optString("error", "Не удалось загрузить плейлист."));
+                return response;
             } catch (JSONException invalid) {
                 throw new IOException("Invalid metadata response", invalid);
             }

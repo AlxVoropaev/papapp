@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { applyChannelState, channelIdPattern, youtubeChannel, youtubeChannelPage, normalizeYoutubeTitle, youtubeId, youtubeTitle, youtubePlaylist, YoutubePlaylistError } from './youtube.mjs';
+import { applyChannelState, channelAvatarIds, channelIdPattern, youtubeChannel, youtubeChannelAvatars, youtubeChannelPage, normalizeYoutubeTitle, youtubeId, youtubeTitle, youtubePlaylist, YoutubePlaylistError } from './youtube.mjs';
 import { categoryList, validCategoryName, selectedTags } from './catalog.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -170,6 +170,14 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
           .run(channel.id, s.family, channel.title, channel.uploads);
         if (!result.changes) fail(409, 'Этот канал уже добавлен.');
         return json(res, 201, channel);
+      }
+      if (path === '/api/channels/avatars' && req.method === 'POST') {
+        const s = session(req);
+        const ids = channelAvatarIds(await body(req));
+        const saved = db.prepare('SELECT 1 FROM channels WHERE family=? AND id=?');
+        const allowed = ids.filter(id => saved.get(s.family, id));
+        if (allowed.length) throttle(req, 'channel-avatars:' + s.family, 20);
+        return json(res, 200, await youtubeChannelAvatars(allowed, youtubeApiKey, youtubeFetch));
       }
       const channelMatch = path.match(/^\/api\/channels\/([^/]+)\/(videos|blacklist|views)(?:\/([\w-]{11}))?$/);
       if (channelMatch && req.method === 'POST') {

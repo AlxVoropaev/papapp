@@ -15,6 +15,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.Html;
 import android.text.InputFilter;
@@ -49,6 +50,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -68,6 +70,8 @@ public final class MainActivity extends Activity {
     private static final String CHANNELS = "@channels";
     private static final String OTHER = "Другое";
     private static final long REFRESH_MS = 5 * 60 * 1000L;
+    private static final int CHANNEL_AVATAR_BATCH_SIZE = 20;
+    private static final long CHANNEL_AVATAR_RETRY_MS = 60_000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService catalogQueue = Executors.newSingleThreadExecutor();
@@ -93,6 +97,10 @@ public final class MainActivity extends Activity {
     private JSONArray categories = new JSONArray();
     private JSONArray channels = new JSONArray();
     private ChannelFeed channelFeed;
+    private final Map<String, String> channelAvatarUrls = new LinkedHashMap<>();
+    private final Map<String, ImageView> channelAvatarViews = new LinkedHashMap<>();
+    private boolean channelAvatarsLoading;
+    private long channelAvatarRetryAt;
     private final Set<String> favorites = new LinkedHashSet<>();
     private boolean showFavorites;
     private String filter;
@@ -350,6 +358,7 @@ public final class MainActivity extends Activity {
                     }
                 }
                 if (changed) renderLibrary();
+                else loadChannelAvatars();
                 deliverShare();
             }
             if (resumed) handler.postDelayed(poll, REFRESH_MS);
@@ -502,17 +511,100 @@ public final class MainActivity extends Activity {
             for (int i = 0; i < channels.length(); i++) {
                 JSONObject channel = channels.optJSONObject(i);
                 if (channel == null) continue;
-                var item = button(channel.optString("title"), false, () -> {
-                    list = null;
-                    channelFeed = new ChannelFeed(channel);
-                    channelFeed.load(true);
-                });
-                item.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-                panel.addView(item, new LinearLayout.LayoutParams(-1, -2));
+                panel.addView(channelRow(channel), new LinearLayout.LayoutParams(-1, -2));
             }
             scroll.addView(panel);
         }
         attachFeed(scroll);
+        loadChannelAvatars();
+    }
+
+    private View channelRow(JSONObject channel) {
+        String title = channel.optString("title");
+        var row = new LinearLayout(this) {
+            @Override public CharSequence getAccessibilityClassName() { return Button.class.getName(); }
+        };
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(60));
+        row.setPaddingRelative(dp(14), dp(10), dp(14), dp(10));
+        row.setBackground(buttonBackground(LIGHT_GREEN, 0x28123b32));
+        row.setContentDescription(title);
+        row.setFocusable(true);
+        row.setOnClickListener(view -> {
+            if (busy || apkUpdates.blocking()) return;
+            list = null;
+            channelFeed = new ChannelFeed(channel);
+            channelFeed.load(true);
+        });
+
+        int size = dp(36);
+        var circle = new FrameLayout(this);
+        circle.setBackground(shape(0xffcfdfd0, 36));
+        circle.setClipToOutline(true);
+        circle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        String initial = title.isEmpty() ? "?" : title.substring(0, title.offsetByCodePoints(0, 1)).toUpperCase(Locale.ROOT);
+        var letter = label(initial, 16, GREEN);
+        letter.setGravity(Gravity.CENTER);
+        letter.setTypeface(Typeface.DEFAULT_BOLD);
+        circle.addView(letter, new FrameLayout.LayoutParams(-1, -1));
+        var avatar = new ImageView(this) {
+            @Override public void setImageBitmap(Bitmap bitmap) {
+                super.setImageBitmap(bitmap);
+                letter.setVisibility(bitmap == null ? View.VISIBLE : View.INVISIBLE);
+            }
+        };
+        avatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        circle.addView(avatar, new FrameLayout.LayoutParams(-1, -1));
+        var avatarLayout = new LinearLayout.LayoutParams(size, size);
+        avatarLayout.setMarginEnd(dp(12));
+        row.addView(circle, avatarLayout);
+
+        var name = label(title, 14, GREEN);
+        name.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        row.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        String id = channel.optString("id");
+        if (id.matches("UC[A-Za-z0-9_-]{22}")) channelAvatarViews.put(id, avatar);
+        return row;
+    }
+
+    private void loadChannelAvatars() {
+        if (session == null || channelAvatarViews.isEmpty()) return;
+        for (var entry : channelAvatarViews.entrySet()) {
+            String url = channelAvatarUrls.get(entry.getKey());
+            ImageView avatar = entry.getValue();
+            if (url != null && !url.isEmpty() && !url.equals(avatar.getTag())) loadImage(url, url, avatar);
+        }
+        if (channelAvatarsLoading || SystemClock.elapsedRealtime() < channelAvatarRetryAt) return;
+
+        var ids = new ArrayList<String>();
+        for (String id : channelAvatarViews.keySet()) {
+            if (!channelAvatarUrls.containsKey(id)) ids.add(id);
+            if (ids.size() == CHANNEL_AVATAR_BATCH_SIZE) break;
+        }
+        if (ids.isEmpty()) return;
+        var shelf = session;
+        var backend = cloudBackend;
+        var local = localBackend;
+        var input = json("ids", new JSONArray(ids));
+        channelAvatarsLoading = true;
+        run(previews, () -> backend == null
+            ? local.request("channels/avatars", "POST", input)
+            : metadata.fetchChannel("avatars", input, backend.idToken()), (result, error) -> {
+            channelAvatarsLoading = false;
+            if (shelf == session) {
+                JSONObject avatars = result == null ? null : result.optJSONObject("avatars");
+                if (avatars == null) {
+                    channelAvatarRetryAt = SystemClock.elapsedRealtime() + CHANNEL_AVATAR_RETRY_MS;
+                    return;
+                }
+                for (String id : ids) {
+                    String url = avatars.optString(id, "");
+                    channelAvatarUrls.put(id, url.length() <= 1024 &&
+                        url.matches("https://yt3\\.(ggpht|googleusercontent)\\.com/[^\\s]+") ? url : "");
+                }
+            }
+            loadChannelAvatars();
+        });
     }
 
     private void addChannel() {
@@ -834,31 +926,34 @@ public final class MainActivity extends Activity {
     }
 
     private void loadThumbnail(String id, ImageView target) {
-        target.setTag(id);
+        loadImage(id, id == null ? null : "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg", target);
+    }
+
+    private void loadImage(String key, String url, ImageView target) {
+        target.setTag(key);
         target.setImageDrawable(null);
-        if (id == null) return;
-        Bitmap cached = thumbnails.get(id);
+        if (url == null) return;
+        Bitmap cached = thumbnails.get(key);
         if (cached != null) {
             target.setImageBitmap(cached);
             return;
         }
         run(images, () -> {
-            var connection = (HttpURLConnection) URI.create("https://i.ytimg.com/vi/" + id + "/mqdefault.jpg")
-                .toURL().openConnection();
+            var connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
             try {
                 connection.setInstanceFollowRedirects(false);
                 connection.setConnectTimeout(3500);
                 connection.setReadTimeout(3500);
                 try (var input = connection.getInputStream()) {
                     Bitmap bitmap = BitmapFactory.decodeStream(input);
-                    if (bitmap != null) thumbnails.put(id, bitmap);
+                    if (bitmap != null) thumbnails.put(key, bitmap);
                     return bitmap;
                 }
             } finally {
                 connection.disconnect();
             }
         }, (bitmap, error) -> {
-            if (bitmap != null && id.equals(target.getTag())) target.setImageBitmap(bitmap);
+            if (bitmap != null && key.equals(target.getTag())) target.setImageBitmap(bitmap);
         });
     }
 
@@ -1472,6 +1567,7 @@ public final class MainActivity extends Activity {
         root.removeAllViews();
         list = null;
         feed = null;
+        channelAvatarViews.clear();
         categoryScrollX = 0;
         body = vertical();
         body.setPadding(dp(20), dp(12), dp(20), 0);

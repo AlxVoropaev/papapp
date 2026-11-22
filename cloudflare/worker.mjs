@@ -1,5 +1,5 @@
 import { categoryList } from '../server/catalog.mjs';
-import { applyChannelState, channelIdPattern, uploadsIdPattern, youtubeChannel, youtubeChannelPage, normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
+import { applyChannelState, channelAvatarIds, channelIdPattern, uploadsIdPattern, youtubeChannel, youtubeChannelAvatars, youtubeChannelPage, normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'openrouter/free';
@@ -97,10 +97,7 @@ async function authorizeFamily(token, project, fetcher) {
   return { uid, base, options };
 }
 
-async function channelPage(token, input, env, fetcher) {
-  const id = input?.id;
-  if (typeof id !== 'string' || !channelIdPattern.test(id)) throw new HttpError(400, 'Проверьте канал.');
-  const project = env.FIREBASE_PROJECT_ID;
+async function channelShelf(token, project, fetcher) {
   const documents = 'projects/' + project + '/databases/(default)/documents';
   const base = 'https://firestore.googleapis.com/v1/' + documents;
   const headers = { Authorization: 'Bearer ' + token };
@@ -121,6 +118,37 @@ async function channelPage(token, input, env, fetcher) {
     }
   }
 
+  return { family, documents, read };
+}
+
+async function channelAvatars(token, input, env, fetcher) {
+  const ids = channelAvatarIds(input);
+  const { family, documents, read } = await channelShelf(token, env.FIREBASE_PROJECT_ID, fetcher);
+  const names = new Map(ids.map(id => [documents + '/families/' + family + '/channels/' + id, id]));
+  // Firestore verifies membership and pairing before returning any saved channel.
+  const response = await read(':batchGet', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documents: [...names.keys()], mask: { fieldPaths: ['title'] } })
+  });
+  if (!response.ok) {
+    throw new HttpError(response.status === 401 || response.status === 403 ? 403 : 503, 'Не удалось загрузить иконки каналов.');
+  }
+  const saved = [];
+  for (const row of await boundedJson(response)) {
+    const name = row.found?.name ?? row.missing;
+    const id = names.get(name);
+    if (!names.delete(name) || row.error) throw new HttpError(503, 'Не удалось загрузить иконки каналов.');
+    if (row.found) saved.push(id);
+  }
+  if (names.size) throw new HttpError(503, 'Не удалось загрузить иконки каналов.');
+  if (saved.length) await checkChannelQuota(env, family);
+  return youtubeChannelAvatars(saved, env.YOUTUBE_API_KEY, fetcher);
+}
+
+async function channelPage(token, input, env, fetcher) {
+  const id = input?.id;
+  if (typeof id !== 'string' || !channelIdPattern.test(id)) throw new HttpError(400, 'Проверьте канал.');
+  const { family, documents, read } = await channelShelf(token, env.FIREBASE_PROJECT_ID, fetcher);
   // The channel read verifies the signed token, family membership and the current pairing epoch.
   const path = '/families/' + family + '/channels/' + id;
   const channel = await read(path);
@@ -343,7 +371,7 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
       }
       const pairingRequest = url.pathname === '/pairing/issue' || url.pathname === '/pairing/resolve';
       const playlistRequest = url.pathname === '/playlist';
-      const channelRequest = ['/channels/resolve', '/channels/videos'].includes(url.pathname);
+      const channelRequest = ['/channels/resolve', '/channels/videos', '/channels/avatars'].includes(url.pathname);
       if (url.pathname !== '/suggest' && !pairingRequest && !playlistRequest && !channelRequest) return json({ error: 'Не найдено.' }, 404);
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
         ...cors, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '3600'
@@ -364,6 +392,7 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
           let input;
           try { input = await boundedJson(request, 8192); } catch { throw new HttpError(400, 'Некорректный запрос.'); }
           if (url.pathname === '/channels/videos') return json(await channelPage(token, input, env, fetcher));
+          if (url.pathname === '/channels/avatars') return json(await channelAvatars(token, input, env, fetcher));
           const { uid } = await authorizeFamily(token, env.FIREBASE_PROJECT_ID, fetcher);
           await checkChannelQuota(env, uid);
           return json(await youtubeChannel(input, env.YOUTUBE_API_KEY, fetcher));

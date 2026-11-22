@@ -89,6 +89,7 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   t.assert.equal((await getDoc(videoRef(reader))).data().viewCount, 2);
 
   const channelId = 'UC' + 'a'.repeat(22);
+  const noAvatarId = 'UC' + 'b'.repeat(22);
   const channel = db => doc(db, 'families', 'parent', 'channels', channelId);
   const uploads = 'UU' + 'a'.repeat(22);
   const channelData = { title: 'Детский канал', uploads };
@@ -98,6 +99,7 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   const state = (db, id) => doc(collection(channel(db), 'videos'), id);
   await assertFails(setDoc(channel(reader), channelData));
   await assertSucceeds(setDoc(channel(adult), channelData));
+  await assertSucceeds(setDoc(doc(adult, 'families', 'parent', 'channels', noAvatarId), channelData));
   await assertFails(getDoc(channel(outsider)));
   await assertSucceeds(getDocs(collection(reader, 'families', 'parent', 'channels')));
   await assertFails(setDoc(state(reader, hidden), { blocked: true }, { merge: true }));
@@ -108,6 +110,9 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   const documents = 'projects/' + project + '/databases/(default)/documents';
   const childToken = createMockUserToken({
     sub: 'child', iat: Math.floor(Date.now() / 1000), firebase: { sign_in_provider: 'anonymous' }
+  }, project);
+  const parentToken = createMockUserToken({
+    sub: 'parent', iat: Math.floor(Date.now() / 1000), firebase: { sign_in_provider: 'password' }
   }, project);
   const bearer = { Authorization: 'Bearer ' + childToken, 'Content-Type': 'application/json' };
   function countView() {
@@ -126,22 +131,36 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   t.assert.deepEqual((await getDoc(state(reader, watched))).data(), { viewCount: 2 });
 
   const origin = 'https://shelf.example';
+  const avatar = 'https://yt3.googleusercontent.com/example=s88';
   const worker = createWorker({ fetcher: (url, options) => {
     if (String(url).startsWith('https://firestore.googleapis.com/')) {
       return fetch(String(url).replace('https://firestore.googleapis.com', 'http://127.0.0.1:8089'), options);
+    }
+    if (url.pathname.endsWith('/channels')) {
+      t.assert.deepEqual(new Set(url.searchParams.get('id').split(',')), new Set([channelId, noAvatarId]));
+      return Response.json({ items: [
+        { id: noAvatarId, snippet: {} },
+        { id: channelId, snippet: { thumbnails: {
+          medium: { url: 'http://yt3.ggpht.com/example=s240' }, default: { url: avatar }
+        } } }
+      ] });
     }
     t.assert.equal(url.searchParams.get('playlistId'), uploads);
     return Response.json({ items: [watched, hidden, fresh].map(videoId => ({
       contentDetails: { videoId }, snippet: { title: videoId }, status: { privacyStatus: 'public' }
     })) });
   } });
-  const openChannel = (operation, body) => worker.fetch(new Request('https://worker.example/channels/' + operation, {
-    method: 'POST', headers: { ...bearer, Origin: origin }, body: JSON.stringify(body)
+  const openChannel = (operation, body, token = childToken) => worker.fetch(new Request('https://worker.example/channels/' + operation, {
+    method: 'POST', headers: { ...bearer, Authorization: 'Bearer ' + token, Origin: origin }, body: JSON.stringify(body)
   }), {
     ALLOWED_ORIGINS: origin, FIREBASE_PROJECT_ID: project, YOUTUBE_API_KEY: 'fixture',
     QUOTA: { idFromName: id => id, get: () => ({ fetch: async () => new Response(null, { status: 204 }) }) }
   });
   t.assert.equal((await openChannel('resolve', { url: '@test' })).status, 401);
+  const avatarInput = { ids: [channelId, 'UC' + 'z'.repeat(22), noAvatarId] };
+  for (const token of [childToken, parentToken]) {
+    t.assert.deepEqual(await (await openChannel('avatars', avatarInput, token)).json(), { avatars: { [channelId]: avatar } });
+  }
   t.assert.deepEqual(await (await openChannel('videos', { id: channelId })).json(), {
     videos: [{ id: watched, title: watched, viewCount: 2 }, { id: fresh, title: fresh, viewCount: 0 }],
     nextPageToken: ''
@@ -201,6 +220,7 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   await assertSucceeds(updateDoc(doc(adult, 'families', 'parent'), { epoch: 2 }));
   await assertFails(getDoc(videoRef(reader)));
   t.assert.equal((await openChannel('videos', { id: channelId })).status, 403);
+  t.assert.equal((await openChannel('avatars', { ids: [channelId] })).status, 403);
   await assertFails(updateDoc(videoRef(reader), { viewCount: increment(1) }));
   await assertFails(getDocs(favorites(reader, 'child')));
   await assertFails(setDoc(favorite(reader, 'child'), { saved: true }));

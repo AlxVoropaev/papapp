@@ -63,6 +63,16 @@ function playlistId(input) {
 }
 
 export const channelIdPattern = /^UC[\w-]{22}$/;
+const channelAvatarBatchSize = 20;
+
+export function channelAvatarIds(input) {
+  const ids = input?.ids;
+  if (!Array.isArray(ids) || !ids.length || ids.length > channelAvatarBatchSize ||
+      !ids.every(id => typeof id === 'string' && channelIdPattern.test(id))) {
+    throw new YoutubePlaylistError(400, 'Проверьте список каналов.');
+  }
+  return [...new Set(ids)];
+}
 export const uploadsIdPattern = /^[\w-]{2,150}$/;
 
 function channelLookup(input) {
@@ -162,6 +172,28 @@ export async function youtubeChannel(input, apiKey, fetcher = fetch) {
     throw new YoutubePlaylistError(404, channelMessages.missing);
   }
   return { id, title, uploads };
+}
+
+export async function youtubeChannelAvatars(ids, apiKey, fetcher = fetch) {
+  const avatars = {};
+  if (!ids.length) return { avatars };
+  const page = await youtubeData('channels', {
+    part: 'snippet',
+    fields: 'items(id,snippet(thumbnails(default(url),medium(url))))',
+    id: ids.join(','),
+    maxResults: String(ids.length)
+  }, apiKey, fetcher, channelMessages);
+  for (const row of page.items) {
+    if (!ids.includes(row?.id)) continue;
+    const thumbnails = row.snippet?.thumbnails;
+    for (const url of [thumbnails?.medium?.url, thumbnails?.default?.url]) {
+      if (typeof url !== 'string' || url.length > 1024) continue;
+      if (!/^https:\/\/yt3\.(?:ggpht|googleusercontent)\.com\/[^\s]+$/.test(url)) continue;
+      avatars[row.id] = url;
+      break;
+    }
+  }
+  return { avatars };
 }
 
 export async function youtubePlaylist(input, apiKey, fetcher = fetch) {

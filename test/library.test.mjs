@@ -10,6 +10,7 @@ import { createApp } from '../server/index.mjs';
 test('a parent and child share views, and only the parent edits the library', async t => {
   let time = Date.now();
   const channelId = 'UC' + 'a'.repeat(22);
+  const avatar = 'https://yt3.ggpht.com/example=s240';
   const uploads = 'UU' + 'a'.repeat(22);
   const first = 'M7lc1UVf-VE';
   const second = 'aBcDeFgHiJ4';
@@ -17,6 +18,13 @@ test('a parent and child share views, and only the parent edits the library', as
     databasePath: ':memory:', metadata: false, now: () => time, youtubeApiKey: 'fixture',
     youtubeFetch: async url => {
       if (url.pathname.endsWith('/channels')) {
+        if (url.searchParams.has('id')) {
+          assert.equal(url.searchParams.get('id'), channelId);
+          assert.equal(url.searchParams.get('fields'), 'items(id,snippet(thumbnails(default(url),medium(url))))');
+          return Response.json({ items: [{ id: channelId, snippet: { thumbnails: {
+            default: { url: 'https://yt3.ggpht.com/example=s88' }, medium: { url: avatar }
+          } } }] });
+        }
         assert.equal(url.searchParams.get('forHandle'), '@пример');
         return Response.json({ items: [{
           id: channelId, snippet: { title: 'Детский канал' },
@@ -138,6 +146,10 @@ test('a parent and child share views, and only the parent edits the library', as
   assert.equal((await parent('channels', 'POST', { url: '@пример' })).status, 409);
   assert.deepEqual((await child('videos')).data.channels, [{ id: channelId, title: 'Детский канал' }]);
   assert.deepEqual((await unrelated('videos')).data.channels, []);
+  assert.deepEqual((await child('channels/avatars', 'POST', { ids: [channelId, 'UC' + 'z'.repeat(22)] })).data,
+    { avatars: { [channelId]: avatar } });
+  assert.deepEqual((await unrelated('channels/avatars', 'POST', { ids: [channelId] })).data, { avatars: {} });
+  assert.equal((await child('channels/avatars', 'POST', { ids: ['invalid'] })).status, 400);
   assert.equal((await unrelated(channelPath + 'videos', 'POST', {})).status, 404);
   assert.equal((await child(channelPath + 'views/' + first, 'POST')).status, 200);
   assert.deepEqual((await child(channelPath + 'videos', 'POST', {})).data, {

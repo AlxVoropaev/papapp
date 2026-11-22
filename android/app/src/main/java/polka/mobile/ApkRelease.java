@@ -10,7 +10,6 @@ final class ApkRelease {
     final URI url;
     final long size;
     final String sha256;
-    String diskPath;
 
     ApkRelease(long versionCode, String versionName, String url, long size, String sha256, boolean debug) {
         if (versionCode < 1 || versionName == null || versionName.length() > 80
@@ -33,18 +32,5 @@ final class ApkRelease {
             throw new IllegalArgumentException("APK updates require HTTPS");
         }
         return uri;
-    }
-
-    static boolean publicDisk(URI uri) {
-        return "https".equals(uri.getScheme()) && ("disk.yandex.ru".equals(uri.getHost())
-            || "disk.360.yandex.ru".equals(uri.getHost()) || "disk.yandex.com".equals(uri.getHost())
-            || "yadi.sk".equals(uri.getHost()));
-    }
-
-    void useDiskPath(String path) {
-        if (!publicDisk(url) || path == null || !path.matches("/[A-Za-z0-9][A-Za-z0-9._-]*\\.apk")) {
-            throw new IllegalArgumentException("Invalid public Disk APK path");
-        }
-        diskPath = path;
     }
 }

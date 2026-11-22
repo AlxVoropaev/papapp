@@ -93,20 +93,25 @@ try {
 
   server = createServer((req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname;
-    if (path === '/android/latest.json' && failManifest) {
-      res.writeHead(503);
+    if (path === '/android/latest.json') {
+      if (failManifest) res.writeHead(503);
+      else res.writeHead(302, { Location: '/release/latest.json' });
+      return res.end();
+    }
+    if (path === '/update.apk') {
+      res.writeHead(302, { Location: '/release/update.apk' });
       return res.end();
     }
     const json = new Map([
       ['/api/session', { role: 'parent', family: 'TEST', name: 'Тестовая полка' }],
       ['/api/videos', { videos: [], categories: [] }],
-      ['/android/latest.json', manifest]
+      ['/release/latest.json', manifest]
     ]);
     if (json.has(path)) {
       res.setHeader('Content-Type', 'application/json');
       return res.end(JSON.stringify(json.get(path)));
     }
-    if (path === '/update.apk') { downloads++; return res.end(apkBytes); }
+    if (path === '/release/update.apk') { downloads++; return res.end(apkBytes); }
     res.writeHead(404); res.end();
   });
   server.listen(0, '127.0.0.1');

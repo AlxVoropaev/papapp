@@ -25,7 +25,6 @@ import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashSet;
@@ -61,7 +60,10 @@ final class ApkUpdates {
         }
         try {
             ApkRelease.checkedUrl(manifest, debug(context));
-            prefs(context).edit().putString("manifest", manifest).apply();
+            var preferences = prefs(context);
+            if (!manifest.equals(preferences.getString("manifest", ""))) {
+                preferences.edit().putString("manifest", manifest).remove("checked").apply();
+            }
             schedule(context);
         } catch (IllegalArgumentException ignored) {
             // Ordinary local HTTP prototypes do not opt into package updates.
@@ -103,12 +105,11 @@ final class ApkUpdates {
         if (data.getInt("schema") != 1 || !context.getPackageName().equals(data.getString("packageName"))) {
             throw new IllegalArgumentException("Wrong APK package");
         }
-        var release = new ApkRelease(data.getLong("versionCode"), data.getString("versionName"), data.getString("url"),
+        if (!"direct".equals(data.optString("source", "direct"))) {
+            throw new IllegalArgumentException("Unknown APK source");
+        }
+        return new ApkRelease(data.getLong("versionCode"), data.getString("versionName"), data.getString("url"),
             data.getLong("size"), data.getString("sha256"), debug(context));
-        String source = data.optString("source", "direct");
-        if ("yandex-disk".equals(source)) release.useDiskPath(data.getString("path"));
-        else if (!"direct".equals(source)) throw new IllegalArgumentException("Unknown APK source");
-        return release;
     }
 
     static boolean ready(Context context) {
@@ -123,24 +124,25 @@ final class ApkUpdates {
             Exception failure = null;
             try {
                 var preferences = prefs(app);
-                String source = preferences.getString("manifest", "");
+                String bundledSource = app.getString(R.string.apk_update_manifest);
+                String configuredSource = preferences.getString("manifest", "");
+                String source = bundledSource.isEmpty() ? configuredSource : bundledSource;
                 if (source.isEmpty()) {
                     if (force) throw new IllegalStateException("APK update source is not configured");
                     return;
                 }
                 if (preferences.getInt("session", -1) >= 0 || (!force
+                        && source.equals(configuredSource)
                         && System.currentTimeMillis() - preferences.getLong("checked", 0) < CHECK_INTERVAL)) return;
                 if (!CHECKING.compareAndSet(false, true)) return;
                 try {
                     JSONObject data;
-                    URI manifest = URI.create(source);
-                    HttpURLConnection connection = connect(app, ApkRelease.publicDisk(manifest)
-                        ? diskDownload(app, manifest, "/latest.json") : manifest);
+                    HttpURLConnection connection = connect(app, URI.create(source));
                     try (InputStream in = connection.getInputStream()) {
                         data = new JSONObject(new String(readLimited(in, 32768), StandardCharsets.UTF_8));
                     } finally { connection.disconnect(); }
                     ApkRelease release = parse(app, data);
-                    preferences.edit().putLong("checked", System.currentTimeMillis()).apply();
+                    preferences.edit().putString("manifest", source).putLong("checked", System.currentTimeMillis()).apply();
                     if (release.versionCode <= installedVersion(app)) {
                         preferences.edit().remove("readyVersion").apply();
                         return;
@@ -149,8 +151,7 @@ final class ApkUpdates {
                     preferences.edit().remove("readyVersion").apply();
                     File partial = new File(directory(app), "download.part");
                     try {
-                        connection = connect(app, release.diskPath == null ? release.url
-                            : diskDownload(app, release.url, release.diskPath));
+                        connection = connect(app, release.url);
                         try (InputStream in = connection.getInputStream(); FileOutputStream out = new FileOutputStream(partial)) {
                             var digest = MessageDigest.getInstance("SHA-256");
                             byte[] buffer = new byte[32768];
@@ -213,16 +214,6 @@ final class ApkUpdates {
             }
         }
         throw new IllegalArgumentException("Too many redirects");
-    }
-
-    private static URI diskDownload(Context context, URI publicFolder, String path) throws Exception {
-        URI request = URI.create("https://cloud-api.yandex.net/v1/disk/public/resources/download?public_key="
-            + URLEncoder.encode(publicFolder.toString(), "UTF-8") + "&path=" + URLEncoder.encode(path, "UTF-8"));
-        HttpURLConnection connection = connect(context, request);
-        try (InputStream in = connection.getInputStream()) {
-            var data = new JSONObject(new String(readLimited(in, 32768), StandardCharsets.UTF_8));
-            return ApkRelease.checkedUrl(data.getString("href"), false);
-        } finally { connection.disconnect(); }
     }
 
     private static byte[] readLimited(InputStream in, int limit) throws Exception {

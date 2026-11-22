@@ -30,16 +30,6 @@ if [ "$mode" = --local ] && [ "${POLKA_TEST_LOCAL_UPDATES:-0}" = 1 ]; then
     sed 's#\(<string name="apk_update_manifest"[^>]*>\)[^<]*#\1#' "$work/res/values/strings.xml" > "$work/strings.xml"
     mv "$work/strings.xml" "$work/res/values/strings.xml"
 fi
-if [ -n "${POLKA_UPDATE_FOLDER:-}" ]; then
-    if ! [[ "$POLKA_UPDATE_FOLDER" =~ ^https://(disk\.yandex\.(ru|com)|disk\.360\.yandex\.ru|yadi\.sk)/d/[A-Za-z0-9_-]+/?$ ]]; then
-        printf 'Expected a public Yandex Disk folder URL in POLKA_UPDATE_FOLDER.\n' >&2
-        exit 2
-    fi
-    sed "s#\(<string name=\"apk_update_manifest\"[^>]*>\)[^<]*#\1$POLKA_UPDATE_FOLDER#" \
-        "$work/res/values/strings.xml" > "$work/strings.xml"
-    mv "$work/strings.xml" "$work/res/values/strings.xml"
-fi
-
 case "$mode" in
     --local)
         sed 's#\(<string name="default_endpoint"[^>]*>\)[^<]*#\1#' "$work/res/values/strings.xml" > "$work/strings.xml"

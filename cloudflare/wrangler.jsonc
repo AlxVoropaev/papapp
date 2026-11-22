@@ -1,0 +1,41 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "papina-polka-tags",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-21",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "FIREBASE_PROJECT_ID": "papina-polka-bec464",
+    "ALLOWED_ORIGINS": "https://papina-polka-bec464.web.app,https://papina-polka-bec464.firebaseapp.com",
+    "LLM_PROVIDER": "polza"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "QUOTA",
+        "class_name": "SuggestionQuota"
+      },
+      {
+        "name": "PAIRING",
+        "class_name": "PairingCodes"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "SuggestionQuota"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["PairingCodes"]
+    }
+  ],
+  "account_id": "eb70e1dbf84038b2208cf9a4f9b306eb"
+}

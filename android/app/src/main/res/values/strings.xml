@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">Видео полка</string>
+    <string name="apk_update_permission_message">Новая версия уже загружена. Разрешите приложению «%1$s» устанавливать обновления в настройках Android.</string>
+    <string name="default_endpoint" translatable="false">https://papina-polka-bec464.web.app</string>
+    <string name="apk_update_manifest" translatable="false">https://disk.yandex.ru/d/Z9Ce-HutrRhXiA</string>
+    <string name="tags_endpoint" translatable="false">https://papina-polka-tags.alx-voropaev.workers.dev/suggest</string>
+    <string name="tags_origin" translatable="false">https://papina-polka-bec464.web.app</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#f8f6ef</item>
+        <item name="android:colorAccent">#123b32</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:statusBarColor">#f8f6ef</item>
+        <item name="android:navigationBarColor">#f8f6ef</item>
+        <item name="android:windowSoftInputMode">adjustResize</item>
+    </style>
+</resources>

@@ -1,0 +1,26 @@
+{
+  "name": "papina-polka",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
+    "test": "node --test test/*.test.mjs",
+    "build:firebase": "node tools/build-firebase.mjs",
+    "test:firestore": "node --test test/firebase/*.test.mjs",
+    "check:worker": "wrangler deploy --config cloudflare/wrangler.jsonc --dry-run",
+    "deploy:worker": "wrangler deploy --config cloudflare/wrangler.jsonc"
+  },
+  "dependencies": {
+    "firebase": "13.4.0"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "6.0.0",
+    "esbuild": "0.28.2",
+    "wrangler": "4.69.0"
+  }
+}

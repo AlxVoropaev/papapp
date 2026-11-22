@@ -1,0 +1,168 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function pathOwner() {
+      return /databases/$(database)/documents/settings/owner;
+    }
+
+    function pathFamily(id) {
+      return /databases/$(database)/documents/families/$(id);
+    }
+
+    function pathChild(uid) {
+      return /databases/$(database)/documents/children/$(uid);
+    }
+
+    function pathInvite(code) {
+      return /databases/$(database)/documents/invites/$(code);
+    }
+
+    function pathPairing(id) {
+      return /databases/$(database)/documents/families/$(id)/private/pairing;
+    }
+
+    function authProvider(provider) {
+      return request.auth != null && request.auth.token.firebase.sign_in_provider == provider;
+    }
+
+    function owner(id) {
+      return authProvider('password') && request.auth.uid == id;
+    }
+
+    function child(id) {
+      return authProvider('anonymous') &&
+        exists(pathChild(request.auth.uid)) &&
+        get(pathChild(request.auth.uid)).data.family == id &&
+        get(pathFamily(id)).data.epoch == get(pathChild(request.auth.uid)).data.epoch;
+    }
+
+    function inviteCode(code) {
+      return code is string && code.matches('^[A-HJ-NP-Z2-9]{24}$');
+    }
+
+    function activeInvite(code, invitation) {
+      let family = get(pathFamily(invitation.family)).data;
+      return invitation.claimedBy == null &&
+        request.time < invitation.createdAt + duration.value(10, 'm') &&
+        get(pathPairing(invitation.family)).data.invite == code &&
+        family.epoch == invitation.epoch;
+    }
+
+    function validClaim(uid, claim) {
+      let invite = getAfter(pathInvite(claim.invite)).data;
+      return authProvider('anonymous') && request.auth.uid == uid &&
+        claim.keys().hasOnly(['family', 'epoch', 'invite']) &&
+        inviteCode(claim.invite) &&
+        get(pathInvite(claim.invite)).data.claimedBy == null &&
+        invite.claimedBy == uid &&
+        claim.family == invite.family && claim.epoch == invite.epoch;
+    }
+
+    function validCategory(family, category) {
+      let record = get(/databases/$(database)/documents/families/$(family)/categories/$(category));
+      return category is string && category.size() > 0 && category.size() <= 60 &&
+        (category == 'Другое' ||
+          (record != null ? record.data.active :
+            category in ['Наука', 'Природа', 'Мультфильмы', 'Творчество']));
+    }
+
+    function validTagAt(family, tags, index) {
+      return tags.size() <= index || (tags[index] != 'Другое' && validCategory(family, tags[index]));
+    }
+
+    function validTags(family, video) {
+      return !('categories' in video) ||
+        (video.categories is list && video.categories.size() <= 9 &&
+          video.categories.toSet().size() == video.categories.size() &&
+          video.category == (video.categories.size() > 0 ? video.categories[0] : 'Другое') &&
+          validTagAt(family, video.categories, 0) && validTagAt(family, video.categories, 1) &&
+          validTagAt(family, video.categories, 2) && validTagAt(family, video.categories, 3) &&
+          validTagAt(family, video.categories, 4) && validTagAt(family, video.categories, 5) &&
+          validTagAt(family, video.categories, 6) && validTagAt(family, video.categories, 7) &&
+          validTagAt(family, video.categories, 8));
+    }
+
+    function validVideo(family, id, video) {
+      return id.matches('^[A-Za-z0-9_-]{11}$') &&
+        video.keys().hasOnly(['title', 'category', 'categories', 'note', 'created']) &&
+        video.title is string && video.title.size() > 0 && video.title.size() <= 160 &&
+        (('categories' in video) ? validTags(family, video) : validCategory(family, video.category)) &&
+        video.note is string && video.note.size() <= 240;
+    }
+
+    match /settings/owner {
+      allow create: if authProvider('password') &&
+        request.resource.data.keys().hasOnly(['uid', 'claim']) &&
+        request.resource.data.uid == request.auth.uid &&
+        request.resource.data.claim is string &&
+        request.resource.data.claim.matches('^[0-9a-f]{64}$') &&
+        exists(/databases/$(database)/documents/setupSecrets/$(request.resource.data.claim));
+    }
+
+    match /families/{id} {
+      allow get: if owner(id) || child(id);
+      allow create: if owner(id) &&
+        getAfter(pathOwner()).data.uid == id &&
+        request.resource.data.keys().hasOnly(['name', 'epoch']) &&
+        request.resource.data.name is string &&
+        request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 60 &&
+        request.resource.data.epoch == 1;
+      allow update: if owner(id) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['epoch']) &&
+        request.resource.data.epoch == resource.data.epoch + 1;
+
+      match /private/pairing {
+        allow get: if owner(id);
+        allow create, update: if owner(id) &&
+          request.resource.data.keys().hasOnly(['invite']) &&
+          inviteCode(request.resource.data.invite) &&
+          !exists(pathInvite(request.resource.data.invite)) &&
+          getAfter(pathInvite(request.resource.data.invite)).data.family == id;
+      }
+
+      match /categories/{categoryId} {
+        allow read: if (owner(id) && exists(pathFamily(id))) || child(id);
+        allow create, update: if owner(id) && exists(pathFamily(id)) &&
+          categoryId != 'Другое' && categoryId.size() <= 60 &&
+          request.resource.data.keys().hasAll(['name', 'active']) &&
+          request.resource.data.keys().hasOnly(['name', 'active']) &&
+          request.resource.data.name is string &&
+          request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 40 &&
+          request.resource.data.active is bool &&
+          (!exists(/databases/$(database)/documents/families/$(id)/categories/$(categoryId)) || resource.data.active);
+      }
+
+      match /videos/{idVideo} {
+        allow read: if (owner(id) && exists(pathFamily(id))) || child(id);
+        allow create: if owner(id) && exists(pathFamily(id)) && validVideo(id, idVideo, request.resource.data) && request.resource.data.created == request.time;
+        allow update: if owner(id) && exists(pathFamily(id)) &&
+          validVideo(id, idVideo, request.resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'categories', 'note']);
+        allow delete: if owner(id) && exists(pathFamily(id));
+      }
+    }
+
+    match /invites/{code} {
+      allow get: if authProvider('anonymous') && activeInvite(code, resource.data);
+      allow create: if inviteCode(code) && owner(request.resource.data.family) &&
+        request.resource.data.keys().hasOnly(['family', 'epoch', 'createdAt', 'claimedBy']) &&
+        exists(pathFamily(request.resource.data.family)) &&
+        getAfter(pathPairing(request.resource.data.family)).data.invite == code &&
+        getAfter(pathFamily(request.resource.data.family)).data.epoch == request.resource.data.epoch &&
+        request.resource.data.claimedBy == null &&
+        request.resource.data.createdAt == request.time;
+      allow update: if authProvider('anonymous') && activeInvite(code, resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['claimedBy']) &&
+        request.resource.data.claimedBy == request.auth.uid &&
+        getAfter(pathChild(request.auth.uid)).data.invite == code &&
+        getAfter(pathChild(request.auth.uid)).data.family == resource.data.family &&
+        getAfter(pathChild(request.auth.uid)).data.epoch == resource.data.epoch;
+    }
+
+    match /children/{uid} {
+      allow get: if authProvider('anonymous') && request.auth.uid == uid;
+      allow create, update: if validClaim(uid, request.resource.data);
+    }
+  }
+}

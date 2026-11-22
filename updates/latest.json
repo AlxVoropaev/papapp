@@ -1,12 +1,11 @@
 {
   "schema": 1,
   "packageName": "polka.mobile",
-  "versionCode": 9,
-  "versionName": "0.6.3",
+  "versionCode": 10,
+  "versionName": "0.6.4",
   "source": "yandex-disk",
   "url": "https://disk.yandex.ru/d/Z9Ce-HutrRhXiA",
-  "path": "/papina-polka-v9.apk",
-  "size": 86799,
-  "sha256": "be5548d1507791659f68f2ca06b7295edd98c7966a5e3ee15a53bbbf4d0e096c"
+  "path": "/papina-polka-v10.apk",
+  "size": 90895,
+  "sha256": "5c21ce2dc73704b51eee4f9b0a2fac2b9c9f6a4a31666c88f20424aa3a7976a3"
 }
-

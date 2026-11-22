@@ -1,5 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createMockUserToken } from '@firebase/util';
+import { createWorker } from '../../cloudflare/worker.mjs';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
 import { collection, deleteDoc, doc, getDoc, getDocs, increment, serverTimestamp, setDoc, Timestamp, updateDoc, writeBatch } from 'firebase/firestore';
 
@@ -86,6 +88,65 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   await assertFails(updateDoc(videoRef(adult), { viewCount: 0 }));
   t.assert.equal((await getDoc(videoRef(reader))).data().viewCount, 2);
 
+  const channelId = 'UC' + 'a'.repeat(22);
+  const channel = db => doc(db, 'families', 'parent', 'channels', channelId);
+  const uploads = 'UU' + 'a'.repeat(22);
+  const channelData = { title: 'Детский канал', uploads };
+  const watched = 'M7lc1UVf-VE';
+  const hidden = 'aBcDeFgHiJ1';
+  const fresh = 'aBcDeFgHiJ2';
+  const state = (db, id) => doc(collection(channel(db), 'videos'), id);
+  await assertFails(setDoc(channel(reader), channelData));
+  await assertSucceeds(setDoc(channel(adult), channelData));
+  await assertFails(getDoc(channel(outsider)));
+  await assertSucceeds(getDocs(collection(reader, 'families', 'parent', 'channels')));
+  await assertFails(setDoc(state(reader, hidden), { blocked: true }, { merge: true }));
+  await assertSucceeds(setDoc(state(adult, hidden), { blocked: true }, { merge: true }));
+  await assertFails(setDoc(state(reader, hidden), { blocked: false }, { merge: true }));
+
+  const project = 'demo-papina-polka';
+  const documents = 'projects/' + project + '/databases/(default)/documents';
+  const childToken = createMockUserToken({
+    sub: 'child', iat: Math.floor(Date.now() / 1000), firebase: { sign_in_provider: 'anonymous' }
+  }, project);
+  const bearer = { Authorization: 'Bearer ' + childToken, 'Content-Type': 'application/json' };
+  function countView() {
+    return fetch('http://127.0.0.1:8089/v1/' + documents + ':commit', {
+      method: 'POST', headers: bearer,
+      body: JSON.stringify({ writes: [{ transform: {
+        document: documents + '/families/parent/channels/' + channelId + '/videos/' + watched,
+        fieldTransforms: [{ fieldPath: 'viewCount', increment: { integerValue: '1' } }]
+      } }] })
+    });
+  }
+  for (const result of await Promise.all([countView(), countView()])) {
+    t.assert.equal(result.status, 200, await result.text());
+  }
+  await assertFails(updateDoc(state(reader, watched), { viewCount: increment(2) }));
+  t.assert.deepEqual((await getDoc(state(reader, watched))).data(), { viewCount: 2 });
+
+  const origin = 'https://shelf.example';
+  const worker = createWorker({ fetcher: (url, options) => {
+    if (String(url).startsWith('https://firestore.googleapis.com/')) {
+      return fetch(String(url).replace('https://firestore.googleapis.com', 'http://127.0.0.1:8089'), options);
+    }
+    t.assert.equal(url.searchParams.get('playlistId'), uploads);
+    return Response.json({ items: [watched, hidden, fresh].map(videoId => ({
+      contentDetails: { videoId }, snippet: { title: videoId }, status: { privacyStatus: 'public' }
+    })) });
+  } });
+  const openChannel = (operation, body) => worker.fetch(new Request('https://worker.example/channels/' + operation, {
+    method: 'POST', headers: { ...bearer, Origin: origin }, body: JSON.stringify(body)
+  }), {
+    ALLOWED_ORIGINS: origin, FIREBASE_PROJECT_ID: project, YOUTUBE_API_KEY: 'fixture',
+    QUOTA: { idFromName: id => id, get: () => ({ fetch: async () => new Response(null, { status: 204 }) }) }
+  });
+  t.assert.equal((await openChannel('resolve', { url: '@test' })).status, 401);
+  t.assert.deepEqual(await (await openChannel('videos', { id: channelId })).json(), {
+    videos: [{ id: watched, title: watched, viewCount: 2 }, { id: fresh, title: fresh, viewCount: 0 }],
+    nextPageToken: ''
+  });
+
   const otherCode = 'D'.repeat(24);
   await assertSucceeds(invite(otherCode));
   await assertSucceeds(enroll(otherReader, 'other-child', otherCode));
@@ -139,6 +200,7 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   await assertFails(enroll(otherReader, 'other-child', thirdCode));
   await assertSucceeds(updateDoc(doc(adult, 'families', 'parent'), { epoch: 2 }));
   await assertFails(getDoc(videoRef(reader)));
+  t.assert.equal((await openChannel('videos', { id: channelId })).status, 403);
   await assertFails(updateDoc(videoRef(reader), { viewCount: increment(1) }));
   await assertFails(getDocs(favorites(reader, 'child')));
   await assertFails(setDoc(favorite(reader, 'child'), { saved: true }));

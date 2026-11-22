@@ -62,6 +62,30 @@ function playlistId(input) {
   } catch { return null; }
 }
 
+export const channelIdPattern = /^UC[\w-]{22}$/;
+export const uploadsIdPattern = /^[\w-]{2,150}$/;
+
+function channelLookup(input) {
+  if (typeof input !== 'string' || input.length > 2048) return null;
+  const value = input.trim();
+  const handle = /^@[^\s/?#@]+$/u;
+  if (handle.test(value)) return ['forHandle', value];
+  if (channelIdPattern.test(value)) return ['id', value];
+  try {
+    const url = new URL(/^https?:\/\//i.test(value) ? value : 'https://' + value);
+    if (!['youtube.com', 'www.youtube.com', 'm.youtube.com'].includes(url.hostname)
+        || url.username || url.password || url.port) return null;
+    const parts = url.pathname.replace(/\/$/, '').slice(1).split('/').map(decodeURIComponent);
+    if (parts.length > 1 && ['featured', 'videos', 'shorts', 'streams', 'playlists', 'community'].includes(parts.at(-1))) {
+      parts.pop();
+    }
+    if (parts.length === 1 && handle.test(parts[0])) return ['forHandle', parts[0]];
+    if (parts.length === 2 && parts[0] === 'channel' && channelIdPattern.test(parts[1])) return ['id', parts[1]];
+    if (parts.length === 2 && parts[0] === 'user' && /^[\w-]+$/.test(parts[1])) return ['forUsername', parts[1]];
+  } catch { /* The caller reports an invalid channel link. */ }
+  return null;
+}
+
 async function youtubeData(resource, params, apiKey, fetcher, messages) {
   if (!apiKey) throw new YoutubePlaylistError(503, messages.unconfigured);
   const url = new URL('https://www.googleapis.com/youtube/v3/' + resource);
@@ -97,10 +121,40 @@ const playlistMessages = {
   retry: 'Откройте плейлист заново.',
   unavailable: 'Не удалось загрузить плейлист с YouTube. Попробуйте ещё раз.'
 };
+const channelMessages = {
+  unconfigured: 'Загрузка каналов пока не настроена.',
+  missing: 'Канал недоступен. Проверьте ссылку.',
+  retry: 'Откройте канал заново.',
+  unavailable: 'Не удалось загрузить канал с YouTube. Попробуйте ещё раз.'
+};
+
+export async function youtubeChannel(input, apiKey, fetcher = fetch) {
+  const lookup = channelLookup(input?.url);
+  if (!lookup) throw new YoutubePlaylistError(400, 'Вставьте ссылку на канал YouTube или его @имя.');
+  const page = await youtubeData('channels', {
+    part: 'snippet,contentDetails',
+    fields: 'items(id,snippet(title),contentDetails(relatedPlaylists(uploads)))',
+    [lookup[0]]: lookup[1]
+  }, apiKey, fetcher, channelMessages);
+  const row = page.items[0];
+  const id = row?.id;
+  const title = typeof row?.snippet?.title === 'string' ? row.snippet.title.trim().slice(0, 160) : '';
+  const uploads = row?.contentDetails?.relatedPlaylists?.uploads;
+  if (typeof id !== 'string' || !channelIdPattern.test(id) || !title
+      || typeof uploads !== 'string' || !uploadsIdPattern.test(uploads)) {
+    throw new YoutubePlaylistError(404, channelMessages.missing);
+  }
+  return { id, title, uploads };
+}
+
 export async function youtubePlaylist(input, apiKey, fetcher = fetch) {
   const id = playlistId(input?.url);
   if (!id) throw new YoutubePlaylistError(400, 'Вставьте ссылку на плейлист YouTube.');
   return playlistPage(id, input?.pageToken ?? '', apiKey, fetcher, playlistMessages);
+}
+
+export function youtubeChannelPage(uploads, pageToken, apiKey, fetcher = fetch) {
+  return playlistPage(uploads, pageToken ?? '', apiKey, fetcher, channelMessages);
 }
 
 async function playlistPage(id, pageToken, apiKey, fetcher, messages) {
@@ -118,7 +172,7 @@ async function playlistPage(id, pageToken, apiKey, fetcher, messages) {
     const id = item?.contentDetails?.videoId;
     const rawTitle = item?.snippet?.title;
     const privacy = item?.status?.privacyStatus;
-    if (!validId(id) || privacy === 'private'
+    if (!validId(id) || privacy === 'private' || (messages === channelMessages && privacy !== 'public')
         || typeof rawTitle !== 'string' || /^(?:deleted|private) video$/i.test(rawTitle.trim())) continue;
     const title = normalizeYoutubeTitle(rawTitle) || rawTitle.trim().slice(0, 160);
     if (title) videos.push({ id, title });
@@ -126,6 +180,16 @@ async function playlistPage(id, pageToken, apiKey, fetcher, messages) {
   const nextPageToken = page.nextPageToken;
   return { videos, nextPageToken: typeof nextPageToken === 'string' && nextPageToken !== pageToken
     && nextPageToken.length <= 512 ? nextPageToken : '' };
+}
+
+export function applyChannelState(page, state) {
+  return {
+    ...page,
+    videos: page.videos.flatMap(video => {
+      const entry = state.get(video.id);
+      return entry?.blocked ? [] : [{ ...video, viewCount: entry?.viewCount ?? 0 }];
+    })
+  };
 }
 
 async function fetchTitle(url, timeoutMs, { signal, fetcher }) {

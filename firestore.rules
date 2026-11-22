@@ -121,6 +121,41 @@ service cloud.firestore {
           getAfter(pathInvite(request.resource.data.invite)).data.family == id;
       }
 
+      match /channels/{channelId} {
+        function shelfOwner() {
+          return owner(id) && exists(pathFamily(id));
+        }
+
+        allow read: if shelfOwner() || child(id);
+        allow create: if shelfOwner() && channelId.matches('^UC[A-Za-z0-9_-]{22}$') &&
+          request.resource.data.keys().hasOnly(['title', 'uploads']) &&
+          request.resource.data.title is string && request.resource.data.title.size() > 0 &&
+          request.resource.data.title.size() <= 160 &&
+          request.resource.data.uploads is string &&
+          request.resource.data.uploads.matches('^[A-Za-z0-9_-]{2,150}$');
+
+        match /videos/{videoId} {
+          function validTarget() {
+            return videoId.matches('^[A-Za-z0-9_-]{11}$') &&
+              exists(/databases/$(database)/documents/families/$(id)/channels/$(channelId));
+          }
+
+          allow read: if shelfOwner() || child(id);
+          allow create: if validTarget() && (
+            (shelfOwner() && request.resource.data.keys().hasOnly(['blocked']) &&
+              request.resource.data.blocked == true) ||
+            ((shelfOwner() || child(id)) && request.resource.data.keys().hasOnly(['viewCount']) &&
+              request.resource.data.viewCount is int && request.resource.data.viewCount == 1));
+          allow update: if validTarget() && (
+            (shelfOwner() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['blocked']) &&
+              request.resource.data.blocked == true) ||
+            ((shelfOwner() || child(id)) &&
+              request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewCount']) &&
+              request.resource.data.viewCount is int &&
+              request.resource.data.viewCount == resource.data.get('viewCount', 0) + 1));
+        }
+      }
+
       match /categories/{categoryId} {
         allow read: if (owner(id) && exists(pathFamily(id))) || child(id);
         allow create, update: if owner(id) && exists(pathFamily(id)) &&

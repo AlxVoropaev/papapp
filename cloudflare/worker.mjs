@@ -1,5 +1,5 @@
 import { categoryList } from '../server/catalog.mjs';
-import { normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
+import { applyChannelState, channelIdPattern, uploadsIdPattern, youtubeChannel, youtubeChannelPage, normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'openrouter/free';
@@ -71,7 +71,7 @@ async function videoTitle(url, fetcher, cache, ctx) {
   throw error;
 }
 
-export function parseIdentity(token, project, now = Date.now()) {
+export function parseIdentity(token, project, now = Date.now(), provider = 'password') {
   try {
     if (!token || token.length > 8192) throw new Error();
     const parts = token.split('.');
@@ -80,11 +80,11 @@ export function parseIdentity(token, project, now = Date.now()) {
     if (claims.aud !== project || claims.iss !== 'https://securetoken.google.com/' + project ||
         typeof claims.exp !== 'number' || claims.exp * 1000 <= now ||
         typeof claims.sub !== 'string' || !/^[\w-]{1,128}$/.test(claims.sub) ||
-        claims.firebase?.sign_in_provider !== 'password') throw new Error();
+        claims.firebase?.sign_in_provider !== provider) throw new Error();
     // These claims only choose the Firestore path. Firestore verifies the actual
     // signed token and ownership before any request reaches the model.
     return claims.sub;
-  } catch { throw new HttpError(401, 'Войдите как родитель.'); }
+  } catch { throw new HttpError(401, provider === 'password' ? 'Войдите как родитель.' : 'Подключите полку снова.'); }
 }
 
 async function authorizeFamily(token, project, fetcher) {
@@ -95,6 +95,69 @@ async function authorizeFamily(token, project, fetcher) {
   if (!family.ok) throw new HttpError(family.status === 403 || family.status === 401 || family.status === 404 ? 403 : 503, 'Не удалось подтвердить доступ к полке.');
   await family.body?.cancel();
   return { uid, base, options };
+}
+
+async function channelPage(token, input, env, fetcher) {
+  const id = input?.id;
+  if (typeof id !== 'string' || !channelIdPattern.test(id)) throw new HttpError(400, 'Проверьте канал.');
+  const project = env.FIREBASE_PROJECT_ID;
+  const documents = 'projects/' + project + '/databases/(default)/documents';
+  const base = 'https://firestore.googleapis.com/v1/' + documents;
+  const headers = { Authorization: 'Bearer ' + token };
+  const read = (path, options = {}) => fetcher(base + path, {
+    ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(5000), redirect: 'error'
+  });
+
+  let family;
+  try {
+    family = parseIdentity(token, project);
+  } catch {
+    const uid = parseIdentity(token, project, Date.now(), 'anonymous');
+    const membership = await read('/children/' + uid);
+    if (!membership.ok) throw new HttpError(403, 'Не удалось подтвердить доступ к полке.');
+    family = (await boundedJson(membership)).fields?.family?.stringValue;
+    if (typeof family !== 'string' || !/^[\w-]{1,128}$/.test(family)) {
+      throw new HttpError(403, 'Не удалось подтвердить доступ к полке.');
+    }
+  }
+
+  // The channel read verifies the signed token, family membership and the current pairing epoch.
+  const path = '/families/' + family + '/channels/' + id;
+  const channel = await read(path);
+  if (!channel.ok) {
+    if (channel.status === 404) throw new HttpError(404, 'Канал не найден.');
+    throw new HttpError(channel.status === 401 || channel.status === 403 ? 403 : 503, 'Не удалось открыть канал.');
+  }
+  const uploads = (await boundedJson(channel)).fields?.uploads?.stringValue;
+  if (typeof uploads !== 'string' || !uploadsIdPattern.test(uploads)) throw new HttpError(404, 'Канал не найден.');
+  await checkChannelQuota(env, family);
+  const page = await youtubeChannelPage(uploads, input.pageToken, env.YOUTUBE_API_KEY, fetcher);
+  if (!page.videos.length) return page;
+
+  const names = new Set(page.videos.map(video => documents + path + '/videos/' + video.id));
+  const states = await read(':batchGet', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documents: [...names], mask: { fieldPaths: ['blocked', 'viewCount'] } })
+  });
+  if (!states.ok) throw new HttpError(503, 'Не удалось загрузить видео канала.');
+  const rows = await boundedJson(states, 65536);
+  const state = new Map();
+  for (const row of rows) {
+    const name = row.found?.name ?? row.missing;
+    if (!names.delete(name) || row.error) throw new HttpError(503, 'Не удалось загрузить видео канала.');
+    state.set(name.split('/').at(-1), {
+      blocked: row.found?.fields?.blocked?.booleanValue === true,
+      viewCount: Number(row.found?.fields?.viewCount?.integerValue) || 0
+    });
+  }
+  if (names.size) throw new HttpError(503, 'Не удалось загрузить видео канала.');
+  return applyChannelState(page, state);
+}
+
+async function checkChannelQuota(env, family) {
+  if (!env.YOUTUBE_API_KEY || !env.QUOTA) throw new HttpError(503, 'Загрузка каналов пока не настроена.');
+  const quota = env.QUOTA.get(env.QUOTA.idFromName('youtube-channel:' + family));
+  if (!(await quota.fetch('https://quota/check')).ok) throw new HttpError(429, 'Слишком много запросов к каналам. Попробуйте позже.');
 }
 
 async function authorizedCategories(token, project, fetcher) {
@@ -280,7 +343,8 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
       }
       const pairingRequest = url.pathname === '/pairing/issue' || url.pathname === '/pairing/resolve';
       const playlistRequest = url.pathname === '/playlist';
-      if (url.pathname !== '/suggest' && !pairingRequest && !playlistRequest) return json({ error: 'Не найдено.' }, 404);
+      const channelRequest = ['/channels/resolve', '/channels/videos'].includes(url.pathname);
+      if (url.pathname !== '/suggest' && !pairingRequest && !playlistRequest && !channelRequest) return json({ error: 'Не найдено.' }, 404);
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
         ...cors, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '3600'
       } });
@@ -292,6 +356,20 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
         } catch (error) {
           return json({ error: error instanceof HttpError ? error.message : 'Сервис подключения временно недоступен.' },
             error instanceof HttpError ? error.status : 503);
+        }
+      }
+      if (channelRequest) {
+        try {
+          const token = request.headers.get('Authorization')?.match(/^Bearer (.+)$/)?.[1];
+          let input;
+          try { input = await boundedJson(request, 8192); } catch { throw new HttpError(400, 'Некорректный запрос.'); }
+          if (url.pathname === '/channels/videos') return json(await channelPage(token, input, env, fetcher));
+          const { uid } = await authorizeFamily(token, env.FIREBASE_PROJECT_ID, fetcher);
+          await checkChannelQuota(env, uid);
+          return json(await youtubeChannel(input, env.YOUTUBE_API_KEY, fetcher));
+        } catch (error) {
+          const known = error instanceof HttpError || error instanceof YoutubePlaylistError;
+          return json({ error: known ? error.message : 'Загрузка каналов временно недоступна.' }, known ? error.status : 503);
         }
       }
       if (playlistRequest) {

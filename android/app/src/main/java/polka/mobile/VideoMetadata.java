@@ -133,6 +133,11 @@ final class VideoMetadata {
         return request(tagsEndpoint.resolve("/playlist"), tagsOrigin, idToken, input, 15000, 65536);
     }
 
+    JSONObject fetchChannel(String operation, JSONObject input, String idToken) throws IOException {
+        if (tagsEndpoint == null) throw new Failure("Загрузка каналов пока не настроена.");
+        return request(tagsEndpoint.resolve("/channels/" + operation), tagsOrigin, idToken, input, 15000, 65536);
+    }
+
     static final class Failure extends IOException {
         Failure(String message) { super(message); }
     }

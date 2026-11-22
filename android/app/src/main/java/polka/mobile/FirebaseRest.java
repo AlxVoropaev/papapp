@@ -189,11 +189,12 @@ final class FirebaseRest {
         commit(json("delete", documents + "/" + path));
     }
 
-    void increment(String path, String field) throws Exception {
+    void increment(String path, String field, boolean requireExisting) throws Exception {
         initialize();
-        commit(json("transform", json("document", documents + "/" + path, "fieldTransforms",
-                new JSONArray().put(json("fieldPath", field, "increment", json("integerValue", "1")))),
-                "currentDocument", json("exists", true)));
+        JSONObject write = json("transform", json("document", documents + "/" + path, "fieldTransforms",
+                new JSONArray().put(json("fieldPath", field, "increment", json("integerValue", "1")))));
+        if (requireExisting) write.put("currentDocument", json("exists", true));
+        commit(write);
     }
 
     static JSONObject json(Object... pairs) throws JSONException {

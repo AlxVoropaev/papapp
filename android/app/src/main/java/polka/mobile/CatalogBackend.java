@@ -102,11 +102,16 @@ final class CatalogBackend {
                 }
                 JSONArray favorites = new JSONArray();
                 for (FirebaseRest.Document row : firebase.list(favoritesPath)) favorites.put(row.id);
-                return json("videos", videos, "categories", categories(shelf), "favorites", favorites);
+                JSONArray channels = new JSONArray();
+                for (FirebaseRest.Document row : firebase.list(shelf + "/channels")) {
+                    channels.put(json("id", row.id, "title", row.fields.getString("title")));
+                }
+                return json("videos", videos, "categories", categories(shelf), "favorites", favorites,
+                    "channels", channels);
             }
         }
         if ("POST".equals(method) && path.matches("video-views/[A-Za-z0-9_-]{11}")) {
-            firebase.increment(shelf + "/videos/" + path.substring("video-views/".length()), "viewCount");
+            firebase.increment(shelf + "/videos/" + path.substring("video-views/".length()), "viewCount", true);
             return ok();
         }
         if (path.matches("favorites/[A-Za-z0-9_-]{11}")) {
@@ -120,12 +125,35 @@ final class CatalogBackend {
                 return ok();
             }
         }
+        if ("POST".equals(method) && path.matches("channels/UC[A-Za-z0-9_-]{22}/(views|blacklist)/[A-Za-z0-9_-]{11}")) {
+            String[] parts = path.split("/");
+            String video = shelf + "/channels/" + parts[1] + "/videos/" + parts[3];
+            if ("views".equals(parts[2])) {
+                firebase.increment(video, "viewCount", false);
+            } else {
+                if (user.anonymous) throw new Failure(403, "Действие доступно только родителю.");
+                firebase.commit(firebase.write(video, json("blocked", true), null, true, null));
+            }
+            return ok();
+        }
         if (user.anonymous) throw new Failure(403, "Действие доступно только родителю.");
         switch (method + " " + path) {
             case "POST pair-code":
                 return makeInvite(shelf);
             case "DELETE child-devices":
                 return revokeChildren(shelf);
+            case "POST channels":
+                String channel = data.getString("id");
+                if (!channel.matches("UC[A-Za-z0-9_-]{22}")) throw new Failure(400, "Проверьте канал.");
+                try {
+                    firebase.commit(firebase.write(shelf + "/channels/" + channel,
+                        json("title", data.getString("title"), "uploads", data.getString("uploads")),
+                        json("exists", false), false, null));
+                } catch (FirebaseRest.RemoteFailure error) {
+                    if (error.conflict()) throw new Failure(409, "Этот канал уже добавлен.");
+                    throw error;
+                }
+                return ok();
             case "POST categories":
                 return changeCategory(shelf, null, method, data);
             case "POST videos":

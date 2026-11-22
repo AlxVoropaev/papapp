@@ -65,8 +65,9 @@ public final class MainActivity extends Activity {
     private static final int MUTED = 0xff4d6259;
     private static final int ERROR = 0xff8b301b;
     private static final int FAVORITE = 0xffaa3552;
+    private static final String CHANNELS = "@channels";
     private static final String OTHER = "Другое";
-    private static final long REFRESH_MS = 10000;
+    private static final long REFRESH_MS = 5 * 60 * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService catalogQueue = Executors.newSingleThreadExecutor();
@@ -90,12 +91,15 @@ public final class MainActivity extends Activity {
     private JSONObject session;
     private JSONArray videos = new JSONArray();
     private JSONArray categories = new JSONArray();
+    private JSONArray channels = new JSONArray();
+    private ChannelFeed channelFeed;
     private final Set<String> favorites = new LinkedHashSet<>();
     private boolean showFavorites;
     private String filter;
     private String status;
     private String pendingLink;
     private ListView list;
+    private PullToRefresh feed;
     private VideoCard playingCard;
     private boolean renderPending;
     private boolean refreshInFlight;
@@ -135,7 +139,8 @@ public final class MainActivity extends Activity {
 
     private boolean safeToInstall() {
         return resumed && (cloudBackend != null || localBackend != null)
-            && (session == null || catalogLoaded) && !busy && !refreshInFlight && dialog == null
+            && (session == null || catalogLoaded) && !busy && !refreshInFlight
+            && (channelFeed == null || !channelFeed.loading) && dialog == null
             && !playback.isOpen() && pendingLink == null;
     }
 
@@ -232,7 +237,7 @@ public final class MainActivity extends Activity {
             if (shortCode) code.setRawInputType(InputType.TYPE_CLASS_NUMBER);
             fields.put("code", code);
         } else {
-            if (create) fields.put("name", field(panel, "Название полки", "Видео полка", 0, 60, true));
+            if (create) fields.put("name", field(panel, "Название полки", getString(R.string.app_name), 0, 60, true));
             if (cloud) fields.put("email", field(panel, "Почта родителя", "",
                 InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS, 254, true));
             else if (!create) fields.put("family", field(panel, "Номер полки", "",
@@ -273,6 +278,8 @@ public final class MainActivity extends Activity {
         session = next;
         videos = new JSONArray();
         categories = new JSONArray();
+        channels = new JSONArray();
+        channelFeed = null;
         favorites.clear();
         showFavorites = false;
         filter = null;
@@ -283,12 +290,17 @@ public final class MainActivity extends Activity {
     }
 
     private void refresh() {
+        if (session == null || refreshInFlight) return;
         handler.removeCallbacks(poll);
-        if (session == null || refreshInFlight || apkUpdates.blocking()) return;
+        if (apkUpdates.blocking()) {
+            if (resumed) handler.postDelayed(poll, REFRESH_MS);
+            return;
+        }
         var originalSession = session;
         refreshInFlight = true;
         run(catalogQueue, () -> request("videos", "GET", null), (result, error) -> {
             refreshInFlight = false;
+            if (feed != null) feed.finishRefresh();
             apkUpdates.reconsider();
             if (session != originalSession) {
                 if (session != null) refresh();
@@ -311,18 +323,21 @@ public final class MainActivity extends Activity {
             } else {
                 JSONArray nextVideos = array(result, "videos");
                 JSONArray nextCategories = array(result, "categories");
+                JSONArray nextChannels = array(result, "channels");
                 JSONArray favoriteIds = array(result, "favorites");
                 var nextFavorites = new LinkedHashSet<String>();
                 for (int i = 0; i < favoriteIds.length(); i++) nextFavorites.add(favoriteIds.optString(i));
                 boolean changed = status != null || !videos.toString().equals(nextVideos.toString())
-                    || !categories.toString().equals(nextCategories.toString()) || !favorites.equals(nextFavorites);
+                    || !categories.toString().equals(nextCategories.toString())
+                    || !channels.toString().equals(nextChannels.toString()) || !favorites.equals(nextFavorites);
                 catalogLoaded = true;
                 videos = nextVideos;
                 categories = nextCategories;
+                channels = nextChannels;
                 favorites.clear();
                 favorites.addAll(nextFavorites);
                 status = null;
-                if (playingCard != null) {
+                if (playingCard != null && playingCard.channel == null) {
                     String playingId = playingCard.video.optString("id");
                     for (int i = 0; i < videos.length(); i++) {
                         JSONObject row = videos.optJSONObject(i);
@@ -357,28 +372,25 @@ public final class MainActivity extends Activity {
         var header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         controls.addView(header, new LinearLayout.LayoutParams(-1, -2));
-        var title = label(showFavorites ? "Избранное" : session.optString("name", "Видео полка"), 26, INK);
+        String appName = getString(R.string.app_name);
+        String shelfName = session.optString("name", appName);
+        if ("Папина полка".equals(shelfName)) shelfName = appName;
+        boolean showChannels = CHANNELS.equals(filter);
+        var title = label(showFavorites ? "Избранное" : shelfName, 26, INK);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         var favoritesButton = iconButton(showFavorites ? R.drawable.ic_heart_filled : R.drawable.ic_heart,
             showFavorites ? "Вернуться на полку" : "Избранное", 12, this::toggleFavoritesFeed);
         favoritesButton.setColorFilter(showFavorites ? FAVORITE : GREEN);
         addHeaderAction(header, favoritesButton);
-        if (parent()) {
-            if (catalogLoaded) {
-                var addVideo = iconButton(R.drawable.ic_add, "Добавить видео", 12, () -> videoForm(null, null));
-                addVideo.setColorFilter(Color.WHITE);
-                addVideo.setBackground(new android.graphics.drawable.RippleDrawable(
-                    android.content.res.ColorStateList.valueOf(0x35ffffff), shape(GREEN, 14), null));
-                addHeaderAction(header, addVideo);
-            }
-            var settingsButton = iconButton(R.drawable.ic_settings, "Настройки", 12, this::settings);
-            settingsButton.setBackground(new android.graphics.drawable.RippleDrawable(
-                android.content.res.ColorStateList.valueOf(0x28123b32), shape(LIGHT_GREEN, 14), null));
-            addHeaderAction(header, settingsButton);
-        } else {
-            header.addView(button("Устройство", false, this::settings));
+        if (parent() && catalogLoaded) {
+            addHeaderAction(header, iconButton(R.drawable.ic_add, showChannels ? "Добавить канал" : "Добавить видео",
+                12, () -> {
+                    if (showChannels) addChannel();
+                    else videoForm(null, null);
+                }));
         }
+        addHeaderAction(header, iconButton(R.drawable.ic_settings, "Настройки", 12, this::settings));
 
         if (status != null) {
             var feedback = label(status, 15, catalogLoaded ? ERROR : MUTED);
@@ -396,18 +408,7 @@ public final class MainActivity extends Activity {
             all.add(video);
             available.addAll(effectiveTags(video));
         }
-        if (filter != null && !available.contains(filter)) filter = null;
-        if (all.isEmpty()) {
-            if (catalogLoaded && status == null) {
-                var empty = label(showFavorites ? "Избранное пока пусто" : "Полка пока пуста", 22, INK);
-                empty.setPadding(0, dp(38), 0, dp(8));
-                controls.addView(empty);
-                String hint = showFavorites ? "Нажмите на сердечко в карточке видео, чтобы сохранить его."
-                    : parent() ? "Добавьте ссылку на первое видео." : "Здесь появятся видео, которые добавит родитель.";
-                controls.addView(label(hint, 16, MUTED));
-            }
-            return;
-        }
+        if (filter != null && !showChannels && !available.contains(filter)) filter = null;
         var chips = new HorizontalScrollView(this);
         chips.setHorizontalScrollBarEnabled(false);
         var row = new LinearLayout(this);
@@ -419,22 +420,199 @@ public final class MainActivity extends Activity {
                 addChip(row, category.optString("name"), category.optString("id"));
             }
         }
+        if (!showFavorites) addChip(row, "Каналы", CHANNELS);
         controls.addView(chips);
+        if (showChannels) {
+            chips.post(() -> chips.scrollTo(row.getWidth(), 0));
+            if (channelFeed == null) renderChannels();
+            else channelFeed.render(controls, first, offset);
+            return;
+        }
+        if (all.isEmpty()) {
+            if (catalogLoaded && status == null) {
+                String hint = showFavorites ? "Нажмите на сердечко в карточке видео, чтобы сохранить его."
+                    : parent() ? "Добавьте ссылку на первое видео." : "Здесь появятся видео, которые добавит родитель.";
+                attachFeed(emptyFeed(showFavorites ? "Избранное пока пусто" : "Полка пока пуста", hint));
+            } else {
+                attachFeed(vertical());
+            }
+            return;
+        }
         var visible = new ArrayList<JSONObject>();
         for (JSONObject video : all) {
             if (filter == null || effectiveTags(video).contains(filter)) visible.add(video);
         }
+        renderVideos(visible, null, null, first, offset, this::refresh);
+    }
+
+    private LinearLayout emptyFeed(String title, String hint) {
+        var panel = vertical();
+        panel.setPadding(dp(20), 0, dp(20), 0);
+        var heading = label(title, 22, INK);
+        heading.setPadding(0, dp(38), 0, dp(8));
+        panel.addView(heading);
+        if (!hint.isEmpty()) panel.addView(label(hint, 16, MUTED));
+        return panel;
+    }
+
+    private void renderVideos(List<JSONObject> rows, ChannelFeed channel, View footer,
+                              int first, int offset, Runnable reload) {
         list = new ListView(this);
         list.setDivider(null);
         list.setClipToPadding(false);
         list.setPadding(0, dp(8), 0, dp(8));
-        list.setAdapter(new VideosAdapter(visible));
-        body.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
-        if (first < visible.size()) list.setSelectionFromTop(first, offset);
+        if (footer != null) list.addFooterView(footer, null, false);
+        list.setAdapter(new VideosAdapter(rows, channel));
+        attachFeed(list, reload);
+        if (first < list.getCount()) list.setSelectionFromTop(first, offset);
+    }
+
+    private void attachFeed(View content) {
+        attachFeed(content, this::refresh);
+    }
+
+    private void attachFeed(View content, Runnable reload) {
+        feed = new PullToRefresh(this, content, GREEN,
+            () -> session != null && !busy && !playback.isOpen() && !apkUpdates.blocking(), reload);
+        body.addView(feed, new LinearLayout.LayoutParams(-1, 0, 1));
+    }
+
+    private void renderChannels() {
+        var scroll = new ScrollView(this);
+        if (channels.length() == 0 && catalogLoaded) {
+            scroll.addView(emptyFeed("Каналов пока нет",
+                parent() ? "Нажмите + и вставьте ссылку на канал YouTube." : "Здесь появятся каналы, которые добавит папа."));
+        } else {
+            var panel = vertical();
+            panel.setPadding(dp(20), dp(12), dp(20), dp(12));
+            for (int i = 0; i < channels.length(); i++) {
+                JSONObject channel = channels.optJSONObject(i);
+                if (channel == null) continue;
+                var item = button(channel.optString("title"), false, () -> {
+                    list = null;
+                    channelFeed = new ChannelFeed(channel);
+                    channelFeed.load(true);
+                });
+                item.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+                panel.addView(item, new LinearLayout.LayoutParams(-1, -2));
+            }
+            scroll.addView(panel);
+        }
+        attachFeed(scroll);
+    }
+
+    private void addChannel() {
+        var panel = formPanel();
+        var link = field(panel, "Ссылка на канал или @имя", "", 0, 2048, true);
+        showForm("Добавить канал YouTube", panel, "Добавить", (current, error) -> {
+            var input = json("url", value(link).trim());
+            submit(current, error, () -> {
+                if (cloudBackend == null) return request("channels", "POST", input);
+                var resolved = metadata.fetchChannel("resolve", input, cloudBackend.idToken());
+                return request("channels", "POST", resolved);
+            }, result -> {
+                current.dismiss();
+                refresh();
+            });
+        });
+    }
+
+    private final class ChannelFeed {
+        final JSONObject shelf = session;
+        final String id;
+        final String title;
+        final ArrayList<JSONObject> rows = new ArrayList<>();
+        final Set<String> seen = new LinkedHashSet<>();
+        String nextPage = "";
+        String error;
+        boolean loading;
+        boolean loaded;
+        boolean retryFirst;
+
+        ChannelFeed(JSONObject channel) {
+            id = channel.optString("id");
+            title = channel.optString("title");
+        }
+
+        void load(boolean first) {
+            if (loading) {
+                if (feed != null) feed.finishRefresh();
+                return;
+            }
+            loading = true;
+            error = null;
+            retryFirst = first;
+            var input = json("id", id, "pageToken", first ? "" : nextPage);
+            renderLibrary();
+            run(catalogQueue, () -> cloudBackend == null
+                ? request("channels/" + id + "/videos", "POST", input)
+                : metadata.fetchChannel("videos", input, cloudBackend.idToken()), (result, failure) -> {
+                if (channelFeed != this || session != shelf) return;
+                loading = false;
+                if (failure == null) {
+                    if (first) {
+                        rows.clear();
+                        seen.clear();
+                    }
+                    JSONArray page = array(result, "videos");
+                    for (int i = 0; i < page.length(); i++) {
+                        JSONObject video = page.optJSONObject(i);
+                        if (video == null) continue;
+                        String key = video.optString("id");
+                        if (seen.add(key)) rows.add(video);
+                    }
+                    nextPage = result.optString("nextPageToken");
+                    loaded = true;
+                } else {
+                    error = message(failure);
+                }
+                renderLibrary();
+                apkUpdates.reconsider();
+            });
+        }
+
+        void render(LinearLayout controls, int first, int offset) {
+            controls.addView(button("‹ Все каналы", false, MainActivity.this::closeChannel));
+            var heading = label(title, 21, INK);
+            heading.setTypeface(Typeface.DEFAULT_BOLD);
+            controls.addView(heading);
+            var footer = vertical();
+            footer.setPadding(dp(20), dp(4), dp(20), dp(8));
+            if (loading) footer.addView(label("Загружаем видео…", 16, MUTED));
+            else if (error != null) {
+                footer.addView(label(error, 16, ERROR));
+                footer.addView(button("Повторить", false, () -> load(retryFirst)));
+            } else if (!nextPage.isEmpty()) {
+                footer.addView(button("Показать ещё", false, () -> load(false)));
+            } else if (rows.isEmpty() && loaded) {
+                footer.addView(label("В канале пока нет доступных видео", 16, MUTED));
+            }
+            renderVideos(rows, this, footer.getChildCount() == 0 ? null : footer, first, offset, () -> load(true));
+        }
+
+        void hide(JSONObject video) {
+            var panel = formPanel();
+            panel.addView(label("Скрыть «" + video.optString("title") + "» из канала для всей семьи?", 16, INK));
+            String key = videoId(video);
+            showForm("Скрыть видео", panel, "Скрыть", (current, error) ->
+                submit(current, error, () -> request("channels/" + id + "/blacklist/" + key, "POST", null), result -> {
+                    rows.removeIf(row -> key.equals(videoId(row)));
+                    current.dismiss();
+                    renderLibrary();
+                }));
+        }
+    }
+
+    private void closeChannel() {
+        playback.close();
+        channelFeed = null;
+        list = null;
+        renderLibrary();
     }
 
     private void toggleFavoritesFeed() {
         showFavorites = !showFavorites;
+        channelFeed = null;
         filter = null;
         playback.close();
         list = null;
@@ -467,7 +645,12 @@ public final class MainActivity extends Activity {
 
     private void addChip(LinearLayout row, String name, String id) {
         var chip = button(name, java.util.Objects.equals(filter, id), () -> {
+            if (CHANNELS.equals(id) && CHANNELS.equals(filter) && channelFeed != null) {
+                closeChannel();
+                return;
+            }
             playback.close();
+            channelFeed = null;
             filter = id;
             list = null;
             renderLibrary();
@@ -480,13 +663,18 @@ public final class MainActivity extends Activity {
     private final class VideosAdapter extends BaseAdapter {
         private final List<JSONObject> rows;
 
-        VideosAdapter(List<JSONObject> rows) { this.rows = rows; }
+        private final ChannelFeed channel;
+
+        VideosAdapter(List<JSONObject> rows, ChannelFeed channel) {
+            this.rows = rows;
+            this.channel = channel;
+        }
         @Override public int getCount() { return rows.size(); }
         @Override public JSONObject getItem(int position) { return rows.get(position); }
         @Override public long getItemId(int position) { return position; }
         @Override public boolean isEnabled(int position) { return false; }
         @Override public View getView(int position, View convertView, ViewGroup parent) {
-            var card = convertView == null ? new VideoCard() : (VideoCard) convertView.getTag();
+            var card = convertView == null ? new VideoCard(channel) : (VideoCard) convertView.getTag();
             card.bind(getItem(position));
             return card.container;
         }
@@ -498,7 +686,6 @@ public final class MainActivity extends Activity {
         final FrameLayout playerHost = new FrameLayout(MainActivity.this);
         final ImageView thumbnail = new ImageView(MainActivity.this);
         final TextView playBadge = label("▶", 22, Color.WHITE);
-        final Button stop = button("Закрыть плеер", false, playback::close);
         final TextView themes = label("", 13, GREEN);
         final TextView views = label("", 13, MUTED);
         final TextView title = label("", 19, INK);
@@ -506,9 +693,11 @@ public final class MainActivity extends Activity {
         final ImageButton favoriteButton;
         final ImageButton editButton;
         final ImageButton removeButton;
+        final ChannelFeed channel;
         JSONObject video;
 
-        VideoCard() {
+        VideoCard(ChannelFeed channel) {
+            this.channel = channel;
             container.setTag(this);
             container.setPadding(0, 0, 0, dp(10));
             container.setOnClickListener(v -> play(this));
@@ -546,12 +735,20 @@ public final class MainActivity extends Activity {
             var viewParams = new LinearLayout.LayoutParams(-2, -2);
             viewParams.setMarginStart(dp(8));
             metadata.addView(views, viewParams);
-            favoriteButton = iconButton(R.drawable.ic_heart, "Добавить в избранное", 14, () -> toggleFavorite(this));
-            metadata.addView(favoriteButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+            if (channel == null) {
+                favoriteButton = iconButton(R.drawable.ic_heart, "Добавить в избранное", 14, () -> toggleFavorite(this));
+                metadata.addView(favoriteButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+            } else {
+                favoriteButton = null;
+                metadata.setMinimumHeight(dp(48));
+            }
             if (parent()) {
-                editButton = iconButton(R.drawable.ic_edit, "Изменить", 15, () -> videoForm(video, null));
-                removeButton = iconButton(R.drawable.ic_delete, "Удалить", 15, () -> removeVideo(video));
-                metadata.addView(editButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
+                editButton = channel == null
+                    ? iconButton(R.drawable.ic_edit, "Изменить", 15, () -> videoForm(video, null)) : null;
+                removeButton = channel == null
+                    ? iconButton(R.drawable.ic_delete, "Удалить", 15, () -> removeVideo(video))
+                    : iconButton(R.drawable.ic_delete, "Скрыть видео", 15, () -> channel.hide(video));
+                if (editButton != null) metadata.addView(editButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
                 metadata.addView(removeButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
             } else {
                 editButton = null;
@@ -562,8 +759,6 @@ public final class MainActivity extends Activity {
             details.addView(title);
             note.setPadding(0, dp(4), 0, 0);
             details.addView(note);
-            stop.setVisibility(View.GONE);
-            details.addView(stop, new LinearLayout.LayoutParams(-1, -2));
         }
 
         void bind(JSONObject value) {
@@ -573,15 +768,15 @@ public final class MainActivity extends Activity {
             media.setContentDescription(playingCard == this ? null : "Смотреть " + name);
             title.setText(name);
             var names = new ArrayList<String>();
-            for (String tag : effectiveTags(video)) names.add(categoryName(tag));
+            if (channel == null) for (String tag : effectiveTags(video)) names.add(categoryName(tag));
             themes.setText(String.join(" · ", names));
             showViews(video.optLong("viewCount"));
-            showFavorite();
+            if (favoriteButton != null) showFavorite();
             note.setText(video.optString("note"));
             note.setVisibility(video.optString("note").isEmpty() ? View.GONE : View.VISIBLE);
-            if (editButton != null) {
-                editButton.setContentDescription("Изменить видео " + name);
-                removeButton.setContentDescription("Удалить видео " + name);
+            if (editButton != null) editButton.setContentDescription("Изменить видео " + name);
+            if (removeButton != null) {
+                removeButton.setContentDescription((channel == null ? "Удалить видео " : "Скрыть видео ") + name);
             }
             loadThumbnail(videoId(video), thumbnail);
         }
@@ -605,7 +800,6 @@ public final class MainActivity extends Activity {
             playerHost.setVisibility(active ? View.VISIBLE : View.GONE);
             thumbnail.setVisibility(active ? View.INVISIBLE : View.VISIBLE);
             playBadge.setVisibility(active ? View.INVISIBLE : View.VISIBLE);
-            stop.setVisibility(active ? View.VISIBLE : View.GONE);
             container.setClickable(!active);
             media.setClickable(!active);
             media.setFocusable(!active);
@@ -656,20 +850,29 @@ public final class MainActivity extends Activity {
         playback.close();
         playingCard = card;
         card.showPlayer(true);
-        String id = card.video.optString("id");
+        JSONObject video = card.video;
         JSONObject shelf = session;
-        if (!playback.open(card.playerHost, videoId(card.video), 0, () -> recordView(id, shelf))) {
+        if (!playback.open(card.playerHost, videoId(video), 0, () -> recordView(card, video, shelf))) {
             playbackClosed();
             toast("Не удалось открыть видео.");
         }
     }
 
-    private void recordView(String id, JSONObject shelf) {
+    private void recordView(VideoCard card, JSONObject video, JSONObject shelf) {
         if (session != shelf) return;
-        run(catalogQueue, () -> request("video-views/" + id, "POST", json()), (result, error) -> {
+        String id = video.optString("id");
+        String path = card.channel == null ? "video-views/" + id : "channels/" + card.channel.id + "/views/" + id;
+        run(catalogQueue, () -> request(path, "POST", json()), (result, error) -> {
             if (session != shelf) return;
-            if (error == null) refresh();
-            else toast("Не удалось сохранить просмотр.");
+            if (error != null) {
+                toast("Не удалось сохранить просмотр.");
+            } else if (card.channel == null) {
+                refresh();
+            } else {
+                long count = video.optLong("viewCount") + 1;
+                put(video, "viewCount", count);
+                if (card.video == video) card.showViews(count);
+            }
         });
     }
 
@@ -1125,11 +1328,7 @@ public final class MainActivity extends Activity {
             panel.addView(button("Темы видео", false, this::manageCategories));
             panel.addView(button("Отключить детские устройства", false, this::disconnectDevices));
         }
-        panel.addView(button("Обновить полку", false, () -> {
-            closeDialog();
-            refresh();
-        }));
-        var current = showForm(parent() ? "Настройки" : "Устройство", panel, "Выйти", (owner, error) ->
+        var current = showForm("Настройки", panel, "Выйти", (owner, error) ->
             submit(owner, error, () -> request("logout", "POST", null), result -> {
                 closeDialog();
                 session = null;
@@ -1252,6 +1451,7 @@ public final class MainActivity extends Activity {
     private void resetBody() {
         root.removeAllViews();
         list = null;
+        feed = null;
         body = vertical();
         body.setPadding(dp(20), dp(12), dp(20), 0);
         root.addView(body, new FrameLayout.LayoutParams(-1, -1));
@@ -1522,7 +1722,7 @@ public final class MainActivity extends Activity {
     }
 
     private String message(Exception error) {
-        if (error instanceof CatalogBackend.Failure || error instanceof LocalCatalog.Failure) return error.getMessage();
+        if (error instanceof CatalogBackend.Failure || error instanceof LocalCatalog.Failure || error instanceof VideoMetadata.Failure) return error.getMessage();
         return "Не удалось связаться с сервером. Попробуйте ещё раз.";
     }
 
@@ -1578,7 +1778,12 @@ public final class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (apkUpdates.blocking() || busy || playback.back()) return;
-        if (session != null && showFavorites) toggleFavoritesFeed();
+        if (session != null && channelFeed != null) closeChannel();
+        else if (session != null && CHANNELS.equals(filter)) {
+            filter = null;
+            list = null;
+            renderLibrary();
+        } else if (session != null && showFavorites) toggleFavoritesFeed();
         else super.onBackPressed();
     }
 

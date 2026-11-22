@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { normalizeYoutubeTitle, youtubeId, youtubeTitle, youtubePlaylist, YoutubePlaylistError } from './youtube.mjs';
+import { applyChannelState, channelIdPattern, youtubeChannel, youtubeChannelPage, normalizeYoutubeTitle, youtubeId, youtubeTitle, youtubePlaylist, YoutubePlaylistError } from './youtube.mjs';
 import { categoryList, validCategoryName, selectedTags } from './catalog.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -15,7 +15,7 @@ const secret = () => randomBytes(32).toString('base64url');
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
 
-export function createApp({ databasePath = join(root, 'data', 'library.sqlite'), production = false, publicOrigin = '', setupKey = '', metadata = true, youtubeApiKey = process.env.YOUTUBE_API_KEY, now = Date.now } = {}) {
+export function createApp({ databasePath = join(root, 'data', 'library.sqlite'), production = false, publicOrigin = '', setupKey = '', metadata = true, youtubeApiKey = process.env.YOUTUBE_API_KEY, youtubeFetch = fetch, now = Date.now } = {}) {
   if (production && (!/^https:\/\//.test(publicOrigin) || !setupKey)) throw new Error('Production requires HTTPS PUBLIC_ORIGIN and SETUP_KEY.');
   if (databasePath !== ':memory:') mkdirSync(dirname(databasePath), { recursive: true });
   const db = new DatabaseSync(databasePath);
@@ -26,6 +26,8 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
     CREATE TABLE IF NOT EXISTS videos(id TEXT PRIMARY KEY, family TEXT NOT NULL REFERENCES families(id), youtube TEXT NOT NULL, title TEXT NOT NULL, category TEXT NOT NULL, note TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(family, youtube));
     CREATE TABLE IF NOT EXISTS categories(id TEXT NOT NULL, family TEXT NOT NULL REFERENCES families(id), name TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(family, id));
     CREATE TABLE IF NOT EXISTS favorites(profile TEXT NOT NULL, video TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE, PRIMARY KEY(profile, video));
+    CREATE TABLE IF NOT EXISTS channels(id TEXT NOT NULL, family TEXT NOT NULL REFERENCES families(id), title TEXT NOT NULL, uploads TEXT NOT NULL, PRIMARY KEY(family, id));
+    CREATE TABLE IF NOT EXISTS channel_videos(family TEXT NOT NULL, channel TEXT NOT NULL, video TEXT NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, viewCount INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(family, channel, video), FOREIGN KEY(family, channel) REFERENCES channels(family, id));
     CREATE TRIGGER IF NOT EXISTS delete_child_favorites AFTER DELETE ON sessions WHEN OLD.role='child'
     BEGIN DELETE FROM favorites WHERE profile=OLD.token; END;`);
   const videoColumns = new Set(db.prepare('PRAGMA table_info(videos)').all().map(column => column.name));
@@ -160,6 +162,38 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
         throttle(req, 'playlist', 20);
         return json(res, 200, await youtubePlaylist(await body(req), youtubeApiKey));
       }
+      if (path === '/api/channels' && req.method === 'POST') {
+        const s = session(req, true);
+        throttle(req, 'channel-resolve', 20);
+        const channel = await youtubeChannel(await body(req), youtubeApiKey, youtubeFetch);
+        const result = db.prepare('INSERT INTO channels VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING')
+          .run(channel.id, s.family, channel.title, channel.uploads);
+        if (!result.changes) fail(409, 'Этот канал уже добавлен.');
+        return json(res, 201, channel);
+      }
+      const channelMatch = path.match(/^\/api\/channels\/([^/]+)\/(videos|blacklist|views)(?:\/([\w-]{11}))?$/);
+      if (channelMatch && req.method === 'POST') {
+        const [, channelId, action, video] = channelMatch;
+        const s = session(req, action === 'blacklist');
+        if (!channelIdPattern.test(channelId) || (action === 'videos') === Boolean(video)) fail(404, 'Действие не найдено.');
+        const channel = db.prepare('SELECT uploads FROM channels WHERE family=? AND id=?').get(s.family, channelId);
+        if (!channel) fail(404, 'Канал не найден.');
+        if (action === 'videos') {
+          throttle(req, 'channel-page:' + s.family, 30);
+          const page = await youtubeChannelPage(channel.uploads, (await body(req)).pageToken, youtubeApiKey, youtubeFetch);
+          const get = db.prepare('SELECT blocked, viewCount FROM channel_videos WHERE family=? AND channel=? AND video=?');
+          const state = new Map(page.videos.map(row => [row.id, get.get(s.family, channelId, row.id)]));
+          return json(res, 200, applyChannelState(page, state));
+        }
+        if (action === 'blacklist') {
+          db.prepare('INSERT INTO channel_videos (family, channel, video, blocked) VALUES (?, ?, ?, 1) ON CONFLICT DO UPDATE SET blocked=1')
+            .run(s.family, channelId, video);
+        } else {
+          db.prepare('INSERT INTO channel_videos (family, channel, video, viewCount) VALUES (?, ?, ?, 1) ON CONFLICT DO UPDATE SET viewCount=viewCount+1')
+            .run(s.family, channelId, video);
+        }
+        return json(res, 200, { ok: true });
+      }
       if (path === '/api/categories' && req.method === 'GET') {
         return json(res, 200, { categories: categoryRows(session(req).family) });
       }
@@ -185,6 +219,7 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
       if (path === '/api/videos' && req.method === 'GET') {
         const s = session(req);
         return json(res, 200, { videos: db.prepare('SELECT id, youtube, title, category, note, created, categories, viewCount FROM videos WHERE family=? ORDER BY created DESC, rowid DESC').all(s.family).map(video => ({ ...video, categories: video.categories ? JSON.parse(video.categories) : (video.category === 'Другое' ? [] : [video.category]) })), categories: categoryRows(s.family),
+          channels: db.prepare('SELECT id, title FROM channels WHERE family=? ORDER BY id').all(s.family),
           favorites: db.prepare('SELECT video FROM favorites WHERE profile=? ORDER BY video').all(profile(s)).map(row => row.video) });
       }
       const favorite = path.match(/^\/api\/favorites\/([a-f0-9]{24})$/);

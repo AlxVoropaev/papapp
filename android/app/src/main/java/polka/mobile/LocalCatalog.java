@@ -24,8 +24,7 @@ final class LocalCatalog {
     }
 
     JSONObject request(String path, String method, JSONObject data) throws Exception {
-        String[] parts = path.split("/", 2);
-        String apiPath = "api/" + parts[0] + (parts.length == 2 ? "/" + Uri.encode(parts[1]) : "");
+        String apiPath = "api/" + Uri.encode(path, "/");
         var connection = (HttpURLConnection) endpoint.resolve(apiPath).toURL().openConnection();
         try {
             connection.setInstanceFollowRedirects(false);

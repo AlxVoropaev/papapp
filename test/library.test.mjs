@@ -9,7 +9,33 @@ import { createApp } from '../server/index.mjs';
 
 test('a parent and child share views, and only the parent edits the library', async t => {
   let time = Date.now();
-  const server = createApp({ databasePath: ':memory:', metadata: false, now: () => time });
+  const channelId = 'UC' + 'a'.repeat(22);
+  const uploads = 'UU' + 'a'.repeat(22);
+  const first = 'M7lc1UVf-VE';
+  const second = 'aBcDeFgHiJ4';
+  const server = createApp({
+    databasePath: ':memory:', metadata: false, now: () => time, youtubeApiKey: 'fixture',
+    youtubeFetch: async url => {
+      if (url.pathname.endsWith('/channels')) {
+        assert.equal(url.searchParams.get('forHandle'), '@пример');
+        return Response.json({ items: [{
+          id: channelId, snippet: { title: 'Детский канал' },
+          contentDetails: { relatedPlaylists: { uploads } }
+        }] });
+      }
+      assert.equal(url.searchParams.get('playlistId'), uploads);
+      const next = url.searchParams.get('pageToken') === 'next';
+      const item = (videoId, title, privacyStatus = 'public') => ({
+        contentDetails: { videoId }, snippet: { title }, status: { privacyStatus }
+      });
+      return Response.json({
+        items: next ? [item(second, 'Второе видео')] : [
+          item(first, 'Первое видео'), item(second, 'По ссылке', 'unlisted')
+        ],
+        nextPageToken: next ? '' : 'next'
+      });
+    }
+  });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -105,6 +131,26 @@ test('a parent and child share views, and only the parent edits the library', as
   assert.equal(library.videos[0].title, edited.title);
   assert.equal(library.videos[0].viewCount, 2);
   assert.equal(library.categories.some(c => c.id === space.id), false);
+  const channelInput = { url: 'https://www.youtube.com/@пример/videos' };
+  const channelPath = 'channels/' + channelId + '/';
+  assert.equal((await child('channels', 'POST', channelInput)).status, 403);
+  assert.equal((await parent('channels', 'POST', channelInput)).status, 201);
+  assert.equal((await parent('channels', 'POST', { url: '@пример' })).status, 409);
+  assert.deepEqual((await child('videos')).data.channels, [{ id: channelId, title: 'Детский канал' }]);
+  assert.deepEqual((await unrelated('videos')).data.channels, []);
+  assert.equal((await unrelated(channelPath + 'videos', 'POST', {})).status, 404);
+  assert.equal((await child(channelPath + 'views/' + first, 'POST')).status, 200);
+  assert.deepEqual((await child(channelPath + 'videos', 'POST', {})).data, {
+    videos: [{ id: first, title: 'Первое видео', viewCount: 1 }], nextPageToken: 'next'
+  });
+  assert.equal((await child(channelPath + 'blacklist/' + first, 'POST')).status, 403);
+  assert.equal((await parent(channelPath + 'blacklist/' + first, 'POST')).status, 200);
+  assert.equal((await parent(channelPath + 'blacklist/' + first, 'POST')).status, 200);
+  assert.deepEqual((await child(channelPath + 'videos', 'POST', {})).data, { videos: [], nextPageToken: 'next' });
+  assert.deepEqual((await child(channelPath + 'videos', 'POST', { pageToken: 'next' })).data, {
+    videos: [{ id: second, title: 'Второе видео', viewCount: 0 }], nextPageToken: ''
+  });
+  assert.equal((await child('videos')).data.videos[0].id, added.data.id);
   assert.equal((await parent('videos/' + added.data.id, 'DELETE')).status, 200);
   assert.deepEqual((await child('videos')).data.videos, []);
   assert.deepEqual((await parent('videos')).data.favorites, []);

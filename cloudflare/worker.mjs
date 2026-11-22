@@ -369,6 +369,9 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
           return json(await youtubeChannel(input, env.YOUTUBE_API_KEY, fetcher));
         } catch (error) {
           const known = error instanceof HttpError || error instanceof YoutubePlaylistError;
+          if (error instanceof YoutubePlaylistError && error.upstream) {
+            console.warn('YouTube API failure', error.upstream.status ?? '-', error.upstream.detail);
+          }
           return json({ error: known ? error.message : 'Загрузка каналов временно недоступна.' }, known ? error.status : 503);
         }
       }
@@ -384,6 +387,9 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
           return json(await youtubePlaylist(input, env.YOUTUBE_API_KEY, fetcher));
         } catch (error) {
           const known = error instanceof HttpError || error instanceof YoutubePlaylistError;
+          if (error instanceof YoutubePlaylistError && error.upstream) {
+            console.warn('YouTube API failure', error.upstream.status ?? '-', error.upstream.detail);
+          }
           return json({ error: known ? error.message : 'Загрузка плейлистов временно недоступна.' }, known ? error.status : 503);
         }
       }

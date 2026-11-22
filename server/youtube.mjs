@@ -90,11 +90,13 @@ async function youtubeData(resource, params, apiKey, fetcher, messages) {
   if (!apiKey) throw new YoutubePlaylistError(503, messages.unconfigured);
   const url = new URL('https://www.googleapis.com/youtube/v3/' + resource);
   url.search = new URLSearchParams(params);
+  let status;
   try {
     const response = await fetcher(url, {
       headers: { 'X-Goog-Api-Key': apiKey, Accept: 'application/json' },
       redirect: 'error', signal: AbortSignal.timeout(5000)
     });
+    status = response.status;
     const page = await response.json();
     if (!response.ok) {
       const reason = page.error?.errors?.[0]?.reason;
@@ -105,14 +107,25 @@ async function youtubeData(resource, params, apiKey, fetcher, messages) {
       if (reason === 'quotaExceeded' || response.status === 429) {
         throw new YoutubePlaylistError(429, 'Достигнут лимит запросов к YouTube. Попробуйте позже.');
       }
-      throw new YoutubePlaylistError(502, messages.unavailable);
+      const detail = typeof reason === 'string' && /^[A-Za-z][A-Za-z_]{0,39}$/.test(reason)
+        ? reason : 'upstream_error';
+      throw youtubeUpstreamError(messages, status, detail);
     }
-    if (!Array.isArray(page?.items) || page.items.length > 50) throw new YoutubePlaylistError(502, messages.unavailable);
+    if (!Array.isArray(page?.items) || page.items.length > 50) {
+      throw youtubeUpstreamError(messages, status, 'invalid_items');
+    }
     return page;
   } catch (error) {
     if (error instanceof YoutubePlaylistError) throw error;
-    throw new YoutubePlaylistError(502, messages.unavailable);
+    const detail = error?.name === 'TimeoutError' ? 'timeout' : status ? 'invalid_response' : 'connection_failed';
+    throw youtubeUpstreamError(messages, status, detail);
   }
+}
+
+function youtubeUpstreamError(messages, status, detail) {
+  const error = new YoutubePlaylistError(502, messages.unavailable);
+  error.upstream = { status, detail };
+  return error;
 }
 
 const playlistMessages = {

@@ -94,9 +94,13 @@ async function youtubeData(resource, params, apiKey, fetcher, messages) {
   try {
     const response = await fetcher(url, {
       headers: { 'X-Goog-Api-Key': apiKey, Accept: 'application/json' },
-      redirect: 'error', signal: AbortSignal.timeout(5000)
+      redirect: 'manual', signal: AbortSignal.timeout(5000)
     });
     status = response.status;
+    if (status >= 300 && status < 400) {
+      await response.body?.cancel();
+      throw youtubeUpstreamError(messages, status, 'unexpected_redirect');
+    }
     const page = await response.json();
     if (!response.ok) {
       const reason = page.error?.errors?.[0]?.reason;

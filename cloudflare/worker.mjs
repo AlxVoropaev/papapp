@@ -105,7 +105,7 @@ async function channelPage(token, input, env, fetcher) {
   const base = 'https://firestore.googleapis.com/v1/' + documents;
   const headers = { Authorization: 'Bearer ' + token };
   const read = (path, options = {}) => fetcher(base + path, {
-    ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(5000), redirect: 'error'
+    ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(5000), redirect: 'manual'
   });
 
   let family;

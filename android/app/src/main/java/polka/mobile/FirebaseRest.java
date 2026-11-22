@@ -11,10 +11,8 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -73,21 +71,8 @@ final class FirebaseRest {
         URI url = URI.create(pairingServer + "/pairing/" + operation);
         String body = data.toString();
         String bearer = authorize ? idToken() : null;
-        try {
-            return request(url.toString(), "POST", body, "application/json", bearer, null, origin);
-        } catch (UnknownHostException error) {
-            // DNS failed before the POST reached the server.
-            IOException failure = error;
-            for (String address : PairingDns.resolve(url.getHost())) {
-                var connection = PairingDns.open(url, address);
-                try {
-                    return request(connection, "POST", body, "application/json", bearer, null, origin);
-                } catch (ConnectException unavailable) {
-                    failure = unavailable;
-                }
-            }
-            throw failure;
-        }
+        return WorkerDns.request(url, connection ->
+            request(connection, "POST", body, "application/json", bearer, null, origin));
     }
 
     void signIn(String email, String password, boolean create) throws Exception {

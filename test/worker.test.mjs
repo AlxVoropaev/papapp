@@ -18,7 +18,7 @@ test('playlist pages require a verified parent and preserve available video orde
     assert.equal(url.origin + url.pathname, 'https://www.googleapis.com/youtube/v3/playlistItems');
     assert.equal(url.searchParams.get('playlistId'), 'PL_example');
     assert.deepEqual(options.headers, { 'X-Goog-Api-Key': 'youtube-test-key', Accept: 'application/json' });
-    assert.equal(options.redirect, 'error');
+    assert.equal(options.redirect, 'manual');
     const pageToken = url.searchParams.get('pageToken');
     pages.push(pageToken);
     const item = (videoId, title, privacyStatus = 'public') => ({

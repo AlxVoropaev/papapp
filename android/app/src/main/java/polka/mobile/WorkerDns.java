@@ -7,6 +7,7 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.net.URI;
@@ -23,11 +24,32 @@ import javax.net.ssl.SSLSocketFactory;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/** A DNS-over-HTTPS fallback for the pairing service on the app's current network. */
-final class PairingDns {
+/** Resolves the Cloudflare Worker on the app's current network, with DNS-over-HTTPS as a fallback. */
+final class WorkerDns {
     private static final int DNS_RESPONSE_LIMIT = 8192;
 
-    static List<String> resolve(String host) throws IOException {
+    interface Request<T, E extends Exception> {
+        T send(HttpsURLConnection connection) throws IOException, E;
+    }
+
+    static <T, E extends Exception> T request(URI target, Request<T, E> request) throws IOException, E {
+        try {
+            return request.send((HttpsURLConnection) target.toURL().openConnection());
+        } catch (UnknownHostException unavailable) {
+            // The original request failed during DNS resolution, before sending its body.
+            IOException failure = unavailable;
+            for (String address : resolve(target.getHost())) {
+                try {
+                    return request.send(open(target, address));
+                } catch (ConnectException refused) {
+                    failure = refused;
+                }
+            }
+            throw failure;
+        }
+    }
+
+    private static List<String> resolve(String host) throws IOException {
         URL resolver = URI.create("https://dns.google/resolve?name=" + Uri.encode(host) + "&type=A").toURL();
         var connection = (HttpsURLConnection) resolver.openConnection();
         connection.setInstanceFollowRedirects(false);
@@ -72,9 +94,11 @@ final class PairingDns {
         return true;
     }
 
-    static HttpsURLConnection open(URI target, String address) throws IOException {
+    private static HttpsURLConnection open(URI target, String address) throws IOException {
         String host = target.getHost();
-        URL endpoint = new URL("https", address, target.getPort(), target.getRawPath());
+        String resource = target.getRawPath();
+        if (target.getRawQuery() != null) resource += "?" + target.getRawQuery();
+        URL endpoint = new URL("https", address, target.getPort(), resource);
         var connection = (HttpsURLConnection) endpoint.openConnection();
         connection.setRequestProperty("Host", host);
         var verifier = HttpsURLConnection.getDefaultHostnameVerifier();

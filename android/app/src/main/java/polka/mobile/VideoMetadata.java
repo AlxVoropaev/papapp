@@ -240,7 +240,14 @@ final class VideoMetadata {
     private static JSONObject request(URI endpoint, String origin, String token, JSONObject body,
                                       int timeout, int maxBytes) throws IOException {
         checkInterrupted();
-        HttpURLConnection connection = (HttpURLConnection) endpoint.toURL().openConnection();
+        if (origin != null) {
+            return WorkerDns.request(endpoint, connection -> request(connection, origin, token, body, timeout, maxBytes));
+        }
+        return request((HttpURLConnection) endpoint.toURL().openConnection(), null, token, body, timeout, maxBytes);
+    }
+
+    private static JSONObject request(HttpURLConnection connection, String origin, String token, JSONObject body,
+                                      int timeout, int maxBytes) throws IOException {
         try {
             connection.setConnectTimeout(timeout);
             connection.setReadTimeout(timeout);

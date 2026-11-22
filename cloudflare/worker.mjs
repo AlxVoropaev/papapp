@@ -1,5 +1,5 @@
-import { categoryList } from '../public/catalog.js';
-import { normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl } from '../public/youtube.js';
+import { categoryList } from '../server/catalog.mjs';
+import { normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl } from '../server/youtube.mjs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'openrouter/free';

@@ -7,13 +7,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../server/index.mjs';
 
-test('a parent shares one library with a read-only child account', async t => {
+test('a parent and child share views, and only the parent edits the library', async t => {
   let time = Date.now();
   const server = createApp({ databasePath: ':memory:', metadata: false, now: () => time });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
   const origin = 'http://127.0.0.1:' + server.address().port;
+  assert.equal((await fetch(origin)).status, 404);
   function client() {
     let cookie;
     return async (path, method = 'GET', data) => {
@@ -55,6 +56,28 @@ test('a parent shares one library with a read-only child account', async t => {
   assert.equal((await parent('videos', 'POST', { ...video, url: 'https://youtube.com/shorts/M7lc1UVf-VE' })).status, 409);
   assert.deepEqual((await child('videos')).data.videos, [added.data]);
   assert.deepEqual((await unrelated('videos')).data.videos, []);
+  const anotherChild = client();
+  const anotherPairing = await parent('pair-code', 'POST');
+  assert.equal((await anotherChild('join', 'POST', { code: anotherPairing.data.code })).status, 200);
+  const favoritePath = 'favorites/' + added.data.id;
+  assert.equal((await unrelated(favoritePath, 'POST')).status, 404);
+  assert.equal((await child(favoritePath, 'POST')).status, 200);
+  assert.equal((await child(favoritePath, 'POST')).status, 200);
+  assert.deepEqual((await child('videos')).data.favorites, [added.data.id]);
+  assert.deepEqual((await anotherChild('videos')).data.favorites, []);
+  assert.deepEqual((await parent('videos')).data.favorites, []);
+  assert.equal((await parent(favoritePath, 'POST')).status, 200);
+  const anotherParent = client();
+  assert.equal((await anotherParent('login', 'POST', { family: created.data.family, password })).status, 200);
+  assert.deepEqual((await anotherParent('videos')).data.favorites, [added.data.id]);
+  assert.equal((await child(favoritePath, 'DELETE')).status, 200);
+  assert.deepEqual((await child('videos')).data.favorites, []);
+  assert.deepEqual((await parent('videos')).data.favorites, [added.data.id]);
+  const viewPath = 'video-views/' + added.data.id;
+  assert.equal((await unrelated(viewPath, 'POST')).status, 404);
+  const viewResults = await Promise.all([parent(viewPath, 'POST'), child(viewPath, 'POST')]);
+  assert.deepEqual(viewResults.map(result => result.status), [200, 200]);
+  assert.equal((await child('videos')).data.videos[0].viewCount, 2);
   assert.equal((await child('videos', 'POST', video)).status, 403);
   assert.equal((await child('videos/' + added.data.id, 'DELETE')).status, 403);
   assert.equal((await unrelated('videos/' + added.data.id, 'DELETE')).status, 404);
@@ -80,9 +103,12 @@ test('a parent shares one library with a read-only child account', async t => {
   assert.equal((await parent('categories/' + encodeURIComponent('Другое'), 'DELETE')).status, 400);
   const library = (await child('videos')).data;
   assert.equal(library.videos[0].title, edited.title);
+  assert.equal(library.videos[0].viewCount, 2);
   assert.equal(library.categories.some(c => c.id === space.id), false);
   assert.equal((await parent('videos/' + added.data.id, 'DELETE')).status, 200);
   assert.deepEqual((await child('videos')).data.videos, []);
+  assert.deepEqual((await parent('videos')).data.favorites, []);
+  assert.equal((await child(viewPath, 'POST')).status, 404);
   assert.equal((await parent('child-devices', 'DELETE')).status, 200);
   assert.equal((await child('videos')).status, 401);
 
@@ -115,5 +141,6 @@ test('opening an existing SQLite shelf preserves its videos and single category'
     assert.equal(video.categories, null);
     assert.equal(video.note, 'Заметка');
     assert.equal(video.created, 123);
+    assert.equal(video.viewCount, 0);
   } finally { migrated.close(); }
 });

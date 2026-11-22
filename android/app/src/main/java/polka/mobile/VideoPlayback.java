@@ -25,8 +25,13 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.io.ByteArrayInputStream;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 final class VideoPlayback {
     private static final String YOUTUBE = "www.youtube.com";
@@ -44,13 +49,23 @@ final class VideoPlayback {
         </style>
         <iframe id="player" title="Плеер YouTube" src="%s" allow="encrypted-media; fullscreen%s" allowfullscreen></iframe>
         <script>
+        %s
+        const watchTimer = createWatchTimer();
         let player;
         let appVisible = true;
         let ready = false;
         let started = false;
         let ended = false;
+        let playing = false;
+        let qualified = false;
+        function sampleWatchTime() {
+          if (playing && appVisible && !document.hidden && watchTimer.sample(player)) {
+            qualified = true;
+          }
+        }
         function pauseHiddenPlayer() {
           if ((!appVisible || document.hidden) && player && typeof player.pauseVideo === 'function') {
+            watchTimer.interrupt();
             player.pauseVideo();
           }
         }
@@ -65,8 +80,9 @@ final class VideoPlayback {
           player.playVideo();
           return true;
         }
-        function playbackEnded() {
-          return ended;
+        function playbackStatus() {
+          sampleWatchTime();
+          return (qualified ? 1 : 0) + (ended ? 2 : 0);
         }
         function onYouTubeIframeAPIReady() {
           player = new YT.Player('player', { events: {
@@ -75,12 +91,21 @@ final class VideoPlayback {
               pauseHiddenPlayer();
             },
             onStateChange: event => {
+              sampleWatchTime();
+              watchTimer.interrupt();
+              playing = event.data === YT.PlayerState.PLAYING;
               if (event.data === YT.PlayerState.ENDED) ended = true;
               if (event.data === YT.PlayerState.BUFFERING) started = true;
-              if (event.data === YT.PlayerState.PLAYING) {
+              if (playing) {
                 started = true;
                 pauseHiddenPlayer();
+                sampleWatchTime();
               }
+            },
+            onPlaybackRateChange: () => watchTimer.interrupt(),
+            onError: () => {
+              playing = false;
+              watchTimer.interrupt();
             }
           }});
         }
@@ -96,6 +121,7 @@ final class VideoPlayback {
     private final Runnable completionPoll = this::checkCompletion;
     private FrameLayout playerFrame;
     private WebView web;
+    private Runnable onViewQualified;
     private FrameLayout fullscreen;
     private WebChromeClient.CustomViewCallback fullscreenCallback;
     private boolean paused;
@@ -108,7 +134,7 @@ final class VideoPlayback {
         appOrigin = "https://" + activity.getPackageName().toLowerCase(Locale.ROOT);
     }
 
-    boolean open(FrameLayout host, String videoId, int startSeconds) {
+    boolean open(FrameLayout host, String videoId, int startSeconds, Runnable onViewQualified) {
         if (videoId == null || !VIDEO_ID.matcher(videoId).matches()
             || activity.isFinishing() || activity.isDestroyed() || isOpen()
             || !host.isAttachedToWindow()) return false;
@@ -126,6 +152,7 @@ final class VideoPlayback {
             }
         });
         playerFrame = frame;
+        this.onViewQualified = onViewQualified;
         host.addView(frame, new FrameLayout.LayoutParams(-1, -1));
         // The card's media slot already has bounds when its previously hidden host first opens.
         View visibleSlot = host.isLayoutRequested() && host.getParent() instanceof View parent ? parent : host;
@@ -148,9 +175,12 @@ final class VideoPlayback {
         if (startSeconds > 0) embed.appendQueryParameter("start", Integer.toString(startSeconds));
 
         WebView view;
-        try {
+        String watchScript;
+        try (var script = new BufferedReader(new InputStreamReader(
+                activity.getAssets().open("watch-time.js"), StandardCharsets.UTF_8))) {
+            watchScript = script.lines().collect(Collectors.joining("\n"));
             view = new WebView(activity);
-        } catch (RuntimeException noWebView) {
+        } catch (IOException | RuntimeException unavailable) {
             showFailure(videoId, startSeconds);
             return;
         }
@@ -247,7 +277,7 @@ final class VideoPlayback {
         playerFrame.addView(view, new FrameLayout.LayoutParams(-1, -1));
         // A local HTML document with this base URL emits the HTTPS Referer required by YouTube.
         String html = String.format(Locale.ROOT, PLAYER_PAGE, embedPath,
-            embed.build().toString().replace("&", "&amp;"), autoplay ? "; autoplay" : "");
+            embed.build().toString().replace("&", "&amp;"), autoplay ? "; autoplay" : "", watchScript);
         view.loadDataWithBaseURL(appOrigin + "/", html, "text/html", "UTF-8", null);
         if (paused) view.onPause();
     }
@@ -277,9 +307,14 @@ final class VideoPlayback {
     private void checkCompletion() {
         WebView current = web;
         if (current == null || paused) return;
-        current.evaluateJavascript("typeof playbackEnded === 'function' && playbackEnded()", finished -> {
+        current.evaluateJavascript("typeof playbackStatus === 'function' && playbackStatus()", status -> {
             if (current != web || paused) return;
-            if ("true".equals(finished)) close();
+            if (("1".equals(status) || "3".equals(status)) && onViewQualified != null) {
+                var record = onViewQualified;
+                onViewQualified = null;
+                record.run();
+            }
+            if ("2".equals(status) || "3".equals(status)) close();
             else scheduleCompletionCheck();
         });
     }
@@ -396,6 +431,7 @@ final class VideoPlayback {
         destroyPlayer();
         var frame = playerFrame;
         playerFrame = null;
+        onViewQualified = null;
         if (frame.getParent() instanceof FrameLayout host) host.removeView(frame);
         onClosed.run();
     }

@@ -85,7 +85,7 @@ service cloud.firestore {
 
     function validVideo(family, id, video) {
       return id.matches('^[A-Za-z0-9_-]{11}$') &&
-        video.keys().hasOnly(['title', 'category', 'categories', 'note', 'created']) &&
+        video.keys().hasOnly(['title', 'category', 'categories', 'note', 'created', 'viewCount']) &&
         video.title is string && video.title.size() > 0 && video.title.size() <= 160 &&
         (('categories' in video) ? validTags(family, video) : validCategory(family, video.category)) &&
         video.note is string && video.note.size() <= 240;
@@ -133,12 +133,31 @@ service cloud.firestore {
           (!exists(/databases/$(database)/documents/families/$(id)/categories/$(categoryId)) || resource.data.active);
       }
 
+      match /favorites/{uid}/videos/{idVideo} {
+        function ownFavorites() {
+          return request.auth != null && request.auth.uid == uid &&
+            ((owner(id) && exists(pathFamily(id))) || child(id));
+        }
+
+        allow read, delete: if ownFavorites();
+        allow create, update: if ownFavorites() &&
+          idVideo.matches('^[A-Za-z0-9_-]{11}$') &&
+          request.resource.data.keys().hasOnly(['saved']) && request.resource.data.saved == true &&
+          exists(/databases/$(database)/documents/families/$(id)/videos/$(idVideo));
+      }
+
       match /videos/{idVideo} {
         allow read: if (owner(id) && exists(pathFamily(id))) || child(id);
-        allow create: if owner(id) && exists(pathFamily(id)) && validVideo(id, idVideo, request.resource.data) && request.resource.data.created == request.time;
+        allow create: if owner(id) && exists(pathFamily(id)) &&
+          validVideo(id, idVideo, request.resource.data) &&
+          !('viewCount' in request.resource.data) && request.resource.data.created == request.time;
         allow update: if owner(id) && exists(pathFamily(id)) &&
           validVideo(id, idVideo, request.resource.data) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'category', 'categories', 'note']);
+        allow update: if ((owner(id) && exists(pathFamily(id))) || child(id)) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewCount']) &&
+          request.resource.data.viewCount is int &&
+          request.resource.data.viewCount == resource.data.get('viewCount', 0) + 1;
         allow delete: if owner(id) && exists(pathFamily(id));
       }
     }

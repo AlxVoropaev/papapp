@@ -19,7 +19,7 @@ import java.util.UUID;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static polka.mobile.FirebaseRest.json;
 
-/** Native catalog and household operations compatible with the web shelf. */
+/** Catalog and household operations for the Android shelf. */
 final class CatalogBackend {
     private static final String OTHER = "Другое";
     private static final List<String> DEFAULT_CATEGORIES = Arrays.asList("Наука", "Природа", "Мультфильмы", "Творчество", OTHER);
@@ -83,6 +83,7 @@ final class CatalogBackend {
         FirebaseRest.User user = firebase.user();
         if (user == null || family == null) throw new Failure(401, "Войдите в свою полку.");
         String shelf = "families/" + family;
+        String favoritesPath = shelf + "/favorites/" + user.uid + "/videos";
         if ("GET".equals(method)) {
             if ("categories".equals(path)) return json("categories", categories(shelf));
             if ("videos".equals(path)) {
@@ -94,12 +95,29 @@ final class CatalogBackend {
                     JSONObject fields = video.fields;
                     JSONObject row = json("id", video.id, "youtube", video.id, "title", fields.optString("title"),
                             "category", fields.optString("category", OTHER), "note", fields.optString("note"),
-                            "created", fields.optLong("created", 0));
+                            "created", fields.optLong("created", 0), "viewCount", fields.optLong("viewCount"));
                     JSONArray tags = fields.optJSONArray("categories");
                     if (tags != null) row.put("categories", tags);
                     videos.put(row);
                 }
-                return json("videos", videos, "categories", categories(shelf));
+                JSONArray favorites = new JSONArray();
+                for (FirebaseRest.Document row : firebase.list(favoritesPath)) favorites.put(row.id);
+                return json("videos", videos, "categories", categories(shelf), "favorites", favorites);
+            }
+        }
+        if ("POST".equals(method) && path.matches("video-views/[A-Za-z0-9_-]{11}")) {
+            firebase.increment(shelf + "/videos/" + path.substring("video-views/".length()), "viewCount");
+            return ok();
+        }
+        if (path.matches("favorites/[A-Za-z0-9_-]{11}")) {
+            String favorite = favoritesPath + path.substring("favorites".length());
+            if ("POST".equals(method)) {
+                firebase.commit(firebase.write(favorite, json("saved", true), null, false, null));
+                return ok();
+            }
+            if ("DELETE".equals(method)) {
+                firebase.delete(favorite);
+                return ok();
             }
         }
         if (user.anonymous) throw new Failure(403, "Действие доступно только родителю.");

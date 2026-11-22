@@ -189,6 +189,13 @@ final class FirebaseRest {
         commit(json("delete", documents + "/" + path));
     }
 
+    void increment(String path, String field) throws Exception {
+        initialize();
+        commit(json("transform", json("document", documents + "/" + path, "fieldTransforms",
+                new JSONArray().put(json("fieldPath", field, "increment", json("integerValue", "1")))),
+                "currentDocument", json("exists", true)));
+    }
+
     static JSONObject json(Object... pairs) throws JSONException {
         JSONObject result = new JSONObject();
         for (int i = 0; i < pairs.length; i += 2) result.put((String) pairs[i], pairs[i + 1]);

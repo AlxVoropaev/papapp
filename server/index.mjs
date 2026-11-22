@@ -2,11 +2,11 @@ import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, randomInt, createHash, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { normalizeYoutubeTitle, youtubeId, youtubeTitle } from './youtube.mjs';
-import { categoryList, validCategoryName, selectedTags } from '../public/catalog.js';
+import { categoryList, validCategoryName, selectedTags } from './catalog.mjs';
 
 const scrypt = promisify(scryptCallback);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,9 +24,16 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, family TEXT NOT NULL REFERENCES families(id), role TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS codes(code TEXT PRIMARY KEY, family TEXT NOT NULL REFERENCES families(id), expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS videos(id TEXT PRIMARY KEY, family TEXT NOT NULL REFERENCES families(id), youtube TEXT NOT NULL, title TEXT NOT NULL, category TEXT NOT NULL, note TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE(family, youtube));
-    CREATE TABLE IF NOT EXISTS categories(id TEXT NOT NULL, family TEXT NOT NULL REFERENCES families(id), name TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(family, id));`);
-  if (!db.prepare('PRAGMA table_info(videos)').all().some(column => column.name === 'categories')) {
+    CREATE TABLE IF NOT EXISTS categories(id TEXT NOT NULL, family TEXT NOT NULL REFERENCES families(id), name TEXT NOT NULL, active INTEGER NOT NULL, PRIMARY KEY(family, id));
+    CREATE TABLE IF NOT EXISTS favorites(profile TEXT NOT NULL, video TEXT NOT NULL REFERENCES videos(id) ON DELETE CASCADE, PRIMARY KEY(profile, video));
+    CREATE TRIGGER IF NOT EXISTS delete_child_favorites AFTER DELETE ON sessions WHEN OLD.role='child'
+    BEGIN DELETE FROM favorites WHERE profile=OLD.token; END;`);
+  const videoColumns = new Set(db.prepare('PRAGMA table_info(videos)').all().map(column => column.name));
+  if (!videoColumns.has('categories')) {
     db.exec("ALTER TABLE videos ADD COLUMN categories TEXT");
+  }
+  if (!videoColumns.has('viewCount')) {
+    db.exec('ALTER TABLE videos ADD COLUMN viewCount INTEGER NOT NULL DEFAULT 0');
   }
   const tagsFor = (data, family) => {
     try { return selectedTags(data, categoryRows(family)); } catch (e) { fail(400, e.message); }
@@ -69,36 +76,16 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
   }
   function json(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); }
   const publicSession = s => ({ family: s.family, name: s.name, role: s.role });
-  const files = new Map([
-    ['/', ['index.html', 'text/html; charset=utf-8']],
-    ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
-    ['/web-update.js', ['web-update.js', 'text/javascript; charset=utf-8']],
-    ['/catalog.js', ['catalog.js', 'text/javascript; charset=utf-8']],
-    ['/tag-suggestions.js', ['tag-suggestions.js', 'text/javascript; charset=utf-8']],
-    ['/youtube.js', ['youtube.js', 'text/javascript; charset=utf-8']],
-    ['/backend.js', ['backend.js', 'text/javascript; charset=utf-8']],
-    ['/style.css', ['style.css', 'text/css; charset=utf-8']],
-    ['/icon.svg', ['icon.svg', 'image/svg+xml']],
-    ['/manifest.webmanifest', ['manifest.webmanifest', 'application/manifest+json']]
-  ]);
+  const profile = s => s.role === 'parent' ? s.family : s.token;
   const server = createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' https://www.youtube.com https://s.ytimg.com; style-src 'self'; img-src 'self' https://i.ytimg.com; frame-src https://www.youtube.com https://www.youtube-nocookie.com; connect-src 'self' https://www.youtube.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     if (production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     try {
       const path = new URL(req.url, 'http://local').pathname;
-      if (req.method === 'GET' && files.has(path)) {
-        const [file, type] = files.get(path);
-        res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-cache' });
-        const content = readFileSync(join(root, 'public', file));
-        if (file === 'index.html' && setupKey) {
-          return res.end(content.toString('utf8').replace('<html lang="ru">', '<html lang="ru" data-setup-key="required">'));
-        }
-        return res.end(content);
-      }
       if (path === '/health' && req.method === 'GET') return json(res, 200, { ok: true });
       if (!['GET', 'HEAD'].includes(req.method)) {
         const origin = publicOrigin || `http://${req.headers.host}`;
@@ -192,7 +179,20 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
       }
       if (path === '/api/videos' && req.method === 'GET') {
         const s = session(req);
-        return json(res, 200, { videos: db.prepare('SELECT id, youtube, title, category, note, created, categories FROM videos WHERE family=? ORDER BY created DESC, rowid DESC').all(s.family).map(video => ({ ...video, categories: video.categories ? JSON.parse(video.categories) : (video.category === 'Другое' ? [] : [video.category]) })), categories: categoryRows(s.family) });
+        return json(res, 200, { videos: db.prepare('SELECT id, youtube, title, category, note, created, categories, viewCount FROM videos WHERE family=? ORDER BY created DESC, rowid DESC').all(s.family).map(video => ({ ...video, categories: video.categories ? JSON.parse(video.categories) : (video.category === 'Другое' ? [] : [video.category]) })), categories: categoryRows(s.family),
+          favorites: db.prepare('SELECT video FROM favorites WHERE profile=? ORDER BY video').all(profile(s)).map(row => row.video) });
+      }
+      const favorite = path.match(/^\/api\/favorites\/([a-f0-9]{24})$/);
+      if (favorite && ['POST', 'DELETE'].includes(req.method)) {
+        const s = session(req);
+        const id = favorite[1];
+        if (req.method === 'POST') {
+          if (!db.prepare('SELECT 1 FROM videos WHERE id=? AND family=?').get(id, s.family)) fail(404, 'Видео не найдено.');
+          db.prepare('INSERT INTO favorites(profile, video) VALUES (?, ?) ON CONFLICT DO NOTHING').run(profile(s), id);
+        } else {
+          db.prepare('DELETE FROM favorites WHERE profile=? AND video=?').run(profile(s), id);
+        }
+        return json(res, 200, { ok: true });
       }
       if (path === '/api/videos' && req.method === 'POST') {
         const s = session(req, true);
@@ -210,10 +210,18 @@ export function createApp({ databasePath = join(root, 'data', 'library.sqlite'),
           } catch { /* A user-entered title also works without YouTube metadata. */ }
         }
         if (!title) fail(400, 'Не получилось загрузить название с YouTube. Введите его вручную.');
-        const video = { id: randomBytes(12).toString('hex'), youtube, title, category, categories: tags, note: text(b.note, 240), created: now() };
+        const video = { id: randomBytes(12).toString('hex'), youtube, title, category, categories: tags, note: text(b.note, 240), created: now(), viewCount: 0 };
         try { db.prepare('INSERT INTO videos (id, family, youtube, title, category, note, created, categories) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(video.id, s.family, youtube, title, category, video.note, video.created, JSON.stringify(tags)); }
         catch (e) { if (e.code?.startsWith('ERR_SQLITE') && String(e.message).includes('UNIQUE')) fail(409, 'Это видео уже есть на полке.'); throw e; }
         return json(res, 201, video);
+      }
+      const view = path.match(/^\/api\/video-views\/([a-f0-9]{24})$/);
+      if (view && req.method === 'POST') {
+        const s = session(req);
+        const result = db.prepare('UPDATE videos SET viewCount=viewCount+1 WHERE id=? AND family=?')
+          .run(view[1], s.family);
+        if (!result.changes) fail(404, 'Видео не найдено.');
+        return json(res, 200, { ok: true });
       }
       const videoMatch = path.match(/^\/api\/videos\/([a-f0-9]{24})$/);
       if (videoMatch && req.method === 'PATCH') {

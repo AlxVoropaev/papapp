@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { categoryList, videoTags, selectedTags } from '../public/catalog.js';
-import { normalizeYoutubeTitle, youtubeId, youtubeTitle } from '../public/youtube.js';
+import { categoryList, videoTags, selectedTags } from '../server/catalog.mjs';
+import { normalizeYoutubeTitle, youtubeId, youtubeTitle } from '../server/youtube.mjs';
 
 test('legacy categories migrate to tags and deletion preserves remaining tags', () => {
   const list = categoryList([{ id: 'space', name: 'Космос', active: true }, { id: 'Наука', name: 'Научное', active: true }]);

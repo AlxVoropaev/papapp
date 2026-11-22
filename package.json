@@ -10,7 +10,6 @@
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
     "test": "node --test test/*.test.mjs",
-    "build:firebase": "node tools/build-firebase.mjs",
     "test:firestore": "node --test test/firebase/*.test.mjs",
     "check:worker": "wrangler deploy --config cloudflare/wrangler.jsonc --dry-run",
     "deploy:worker": "wrangler deploy --config cloudflare/wrangler.jsonc"
@@ -20,7 +19,6 @@
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "6.0.0",
-    "esbuild": "0.28.2",
     "wrangler": "4.69.0"
   }
 }

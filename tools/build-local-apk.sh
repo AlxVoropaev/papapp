@@ -61,7 +61,7 @@ mkdir -p "$(dirname "$apk")"
 
 "$build_tools/aapt2" compile --dir "$work/res" -o "$work/resources.zip"
 "$build_tools/aapt2" link -I "$platform" --manifest "$work/AndroidManifest.xml" \
-    --min-sdk-version 26 --target-sdk-version "$target_sdk" --java "$work/r" \
+    --min-sdk-version 26 --target-sdk-version "$target_sdk" --java "$work/r" -A "$source_dir/assets" \
     -o "$work/without-dex.apk" "$work/resources.zip"
 "$JAVA_HOME/bin/javac" --release 17 -encoding UTF-8 -classpath "$platform" \
     -d "$work/classes" "$work/r/polka/mobile/R.java" \

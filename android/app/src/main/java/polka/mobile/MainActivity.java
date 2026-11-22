@@ -50,6 +50,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,6 +64,7 @@ public final class MainActivity extends Activity {
     private static final int YELLOW = 0xffffd65a;
     private static final int MUTED = 0xff4d6259;
     private static final int ERROR = 0xff8b301b;
+    private static final int FAVORITE = 0xffaa3552;
     private static final String OTHER = "Другое";
     private static final long REFRESH_MS = 10000;
 
@@ -87,6 +89,8 @@ public final class MainActivity extends Activity {
     private JSONObject session;
     private JSONArray videos = new JSONArray();
     private JSONArray categories = new JSONArray();
+    private final Set<String> favorites = new LinkedHashSet<>();
+    private boolean showFavorites;
     private String filter;
     private String status;
     private String pendingLink;
@@ -268,6 +272,8 @@ public final class MainActivity extends Activity {
         session = next;
         videos = new JSONArray();
         categories = new JSONArray();
+        favorites.clear();
+        showFavorites = false;
         filter = null;
         catalogLoaded = false;
         status = "Загружаем видео…";
@@ -304,12 +310,28 @@ public final class MainActivity extends Activity {
             } else {
                 JSONArray nextVideos = array(result, "videos");
                 JSONArray nextCategories = array(result, "categories");
+                JSONArray favoriteIds = array(result, "favorites");
+                var nextFavorites = new LinkedHashSet<String>();
+                for (int i = 0; i < favoriteIds.length(); i++) nextFavorites.add(favoriteIds.optString(i));
                 boolean changed = status != null || !videos.toString().equals(nextVideos.toString())
-                    || !categories.toString().equals(nextCategories.toString());
+                    || !categories.toString().equals(nextCategories.toString()) || !favorites.equals(nextFavorites);
                 catalogLoaded = true;
                 videos = nextVideos;
                 categories = nextCategories;
+                favorites.clear();
+                favorites.addAll(nextFavorites);
                 status = null;
+                if (playingCard != null) {
+                    String playingId = playingCard.video.optString("id");
+                    for (int i = 0; i < videos.length(); i++) {
+                        JSONObject row = videos.optJSONObject(i);
+                        if (playingId.equals(row.optString("id"))) {
+                            playingCard.showViews(row.optLong("viewCount"));
+                            playingCard.showFavorite();
+                            break;
+                        }
+                    }
+                }
                 if (changed) renderLibrary();
                 deliverShare();
             }
@@ -334,9 +356,13 @@ public final class MainActivity extends Activity {
         var header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
         controls.addView(header, new LinearLayout.LayoutParams(-1, -2));
-        var title = label(session.optString("name", "Видео полка"), 26, INK);
+        var title = label(showFavorites ? "Избранное" : session.optString("name", "Видео полка"), 26, INK);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
+        var favoritesButton = iconButton(showFavorites ? R.drawable.ic_heart_filled : R.drawable.ic_heart,
+            showFavorites ? "Вернуться на полку" : "Избранное", 12, this::toggleFavoritesFeed);
+        favoritesButton.setColorFilter(showFavorites ? FAVORITE : GREEN);
+        addHeaderAction(header, favoritesButton);
         if (parent()) {
             if (catalogLoaded) {
                 var addVideo = iconButton(R.drawable.ic_add, "Добавить видео", 12, () -> videoForm(null, null));
@@ -365,18 +391,19 @@ public final class MainActivity extends Activity {
         var available = new LinkedHashSet<String>();
         for (int i = 0; i < videos.length(); i++) {
             JSONObject video = videos.optJSONObject(i);
-            if (video == null) continue;
+            if (video == null || (showFavorites && !favorites.contains(video.optString("id")))) continue;
             all.add(video);
             available.addAll(effectiveTags(video));
         }
         if (filter != null && !available.contains(filter)) filter = null;
         if (all.isEmpty()) {
             if (catalogLoaded && status == null) {
-                var empty = label("Полка пока пуста", 22, INK);
+                var empty = label(showFavorites ? "Избранное пока пусто" : "Полка пока пуста", 22, INK);
                 empty.setPadding(0, dp(38), 0, dp(8));
                 controls.addView(empty);
-                controls.addView(label(parent() ? "Добавьте ссылку на первое видео."
-                    : "Здесь появятся видео, которые добавит родитель.", 16, MUTED));
+                String hint = showFavorites ? "Нажмите на сердечко в карточке видео, чтобы сохранить его."
+                    : parent() ? "Добавьте ссылку на первое видео." : "Здесь появятся видео, которые добавит родитель.";
+                controls.addView(label(hint, 16, MUTED));
             }
             return;
         }
@@ -403,6 +430,32 @@ public final class MainActivity extends Activity {
         list.setAdapter(new VideosAdapter(visible));
         body.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
         if (first < visible.size()) list.setSelectionFromTop(first, offset);
+    }
+
+    private void toggleFavoritesFeed() {
+        showFavorites = !showFavorites;
+        filter = null;
+        playback.close();
+        list = null;
+        renderLibrary();
+    }
+
+    private void toggleFavorite(VideoCard card) {
+        if (!catalogLoaded) return;
+        var originalSession = session;
+        String id = card.video.optString("id");
+        boolean save = !favorites.contains(id);
+        runBusy(() -> request("favorites/" + id, save ? "POST" : "DELETE", null), result -> {
+            if (session != originalSession) return;
+            if (save) favorites.add(id);
+            else favorites.remove(id);
+            card.showFavorite();
+            renderLibrary();
+        }, error -> {
+            if (session != originalSession) return;
+            toast(message(error));
+            refresh();
+        });
     }
 
     private void addHeaderAction(LinearLayout header, ImageButton button) {
@@ -446,8 +499,10 @@ public final class MainActivity extends Activity {
         final TextView playBadge = label("▶", 22, Color.WHITE);
         final Button stop = button("Закрыть плеер", false, playback::close);
         final TextView themes = label("", 13, GREEN);
+        final TextView views = label("", 13, MUTED);
         final TextView title = label("", 19, INK);
         final TextView note = label("", 15, MUTED);
+        final ImageButton favoriteButton;
         final ImageButton editButton;
         final ImageButton removeButton;
         JSONObject video;
@@ -475,13 +530,23 @@ public final class MainActivity extends Activity {
             media.addView(playerHost, new FrameLayout.LayoutParams(-1, -1));
             var details = vertical();
             details.setBackgroundColor(Color.WHITE);
-            details.setPadding(dp(16), parent() ? 0 : dp(10), dp(16), dp(12));
+            details.setPadding(dp(16), 0, dp(16), dp(12));
             container.addView(details, new LinearLayout.LayoutParams(-1, -2));
 
             var metadata = new LinearLayout(MainActivity.this);
             metadata.setGravity(Gravity.CENTER_VERTICAL);
             details.addView(metadata, new LinearLayout.LayoutParams(-1, -2));
             metadata.addView(themes, new LinearLayout.LayoutParams(0, -2, 1));
+            var eye = getDrawable(R.drawable.ic_eye).mutate();
+            eye.setTint(MUTED);
+            eye.setBounds(0, 0, dp(16), dp(16));
+            views.setCompoundDrawablesRelative(eye, null, null, null);
+            views.setCompoundDrawablePadding(dp(5));
+            var viewParams = new LinearLayout.LayoutParams(-2, -2);
+            viewParams.setMarginStart(dp(8));
+            metadata.addView(views, viewParams);
+            favoriteButton = iconButton(R.drawable.ic_heart, "Добавить в избранное", 14, () -> toggleFavorite(this));
+            metadata.addView(favoriteButton, new LinearLayout.LayoutParams(dp(48), dp(48)));
             if (parent()) {
                 editButton = iconButton(R.drawable.ic_edit, "Изменить", 15, () -> videoForm(video, null));
                 removeButton = iconButton(R.drawable.ic_delete, "Удалить", 15, () -> removeVideo(video));
@@ -490,7 +555,6 @@ public final class MainActivity extends Activity {
             } else {
                 editButton = null;
                 removeButton = null;
-                themes.setPadding(0, 0, 0, dp(6));
             }
 
             title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -510,6 +574,8 @@ public final class MainActivity extends Activity {
             var names = new ArrayList<String>();
             for (String tag : effectiveTags(video)) names.add(categoryName(tag));
             themes.setText(String.join(" · ", names));
+            showViews(video.optLong("viewCount"));
+            showFavorite();
             note.setText(video.optString("note"));
             note.setVisibility(video.optString("note").isEmpty() ? View.GONE : View.VISIBLE);
             if (editButton != null) {
@@ -517,6 +583,21 @@ public final class MainActivity extends Activity {
                 removeButton.setContentDescription("Удалить видео " + name);
             }
             loadThumbnail(videoId(video), thumbnail);
+        }
+
+        void showFavorite() {
+            boolean saved = favorites.contains(video.optString("id"));
+            String action = saved ? "Убрать из избранного" : "Добавить в избранное";
+            favoriteButton.setImageResource(saved ? R.drawable.ic_heart_filled : R.drawable.ic_heart);
+            favoriteButton.setColorFilter(saved ? FAVORITE : GREEN);
+            favoriteButton.setContentDescription(action + " — " + video.optString("title"));
+            favoriteButton.setTooltipText(action);
+        }
+
+        void showViews(long count) {
+            String number = java.text.NumberFormat.getIntegerInstance().format(count);
+            views.setText(number);
+            views.setContentDescription("Просмотров: " + number);
         }
 
         void showPlayer(boolean active) {
@@ -574,10 +655,21 @@ public final class MainActivity extends Activity {
         playback.close();
         playingCard = card;
         card.showPlayer(true);
-        if (!playback.open(card.playerHost, videoId(card.video), 0)) {
+        String id = card.video.optString("id");
+        JSONObject shelf = session;
+        if (!playback.open(card.playerHost, videoId(card.video), 0, () -> recordView(id, shelf))) {
             playbackClosed();
             toast("Не удалось открыть видео.");
         }
+    }
+
+    private void recordView(String id, JSONObject shelf) {
+        if (session != shelf) return;
+        run(catalogQueue, () -> request("video-views/" + id, "POST", json()), (result, error) -> {
+            if (session != shelf) return;
+            if (error == null) refresh();
+            else toast("Не удалось сохранить просмотр.");
+        });
     }
 
     private void playbackClosed() {
@@ -1298,7 +1390,9 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (!apkUpdates.blocking() && !busy && !playback.back()) super.onBackPressed();
+        if (apkUpdates.blocking() || busy || playback.back()) return;
+        if (session != null && showFavorites) toggleFavoritesFeed();
+        else super.onBackPressed();
     }
 
     @Override protected void onResume() {

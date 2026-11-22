@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { collection, doc, getDoc, getDocs, serverTimestamp, setDoc, Timestamp, updateDoc, writeBatch } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, increment, serverTimestamp, setDoc, Timestamp, updateDoc, writeBatch } from 'firebase/firestore';
 
 test('only the parent can edit the shelf and a child needs a fresh invitation', async t => {
   const env = await initializeTestEnvironment({
@@ -76,6 +76,35 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   await assertSucceeds(getDocs(collection(reader, 'families', 'parent', 'videos')));
   await assertFails(getDoc(videoRef(outsider)));
   await assertFails(getDoc(videoRef(otherReader)));
+  await assertFails(updateDoc(videoRef(otherReader), { viewCount: increment(1) }));
+  await assertFails(updateDoc(videoRef(reader), { viewCount: increment(2) }));
+  await assertFails(updateDoc(videoRef(reader), { viewCount: increment(1), title: 'Другой заголовок' }));
+  await Promise.all([
+    assertSucceeds(updateDoc(videoRef(reader), { viewCount: increment(1) })),
+    assertSucceeds(updateDoc(videoRef(adult), { viewCount: increment(1) }))
+  ]);
+  await assertFails(updateDoc(videoRef(adult), { viewCount: 0 }));
+  t.assert.equal((await getDoc(videoRef(reader))).data().viewCount, 2);
+
+  const otherCode = 'D'.repeat(24);
+  await assertSucceeds(invite(otherCode));
+  await assertSucceeds(enroll(otherReader, 'other-child', otherCode));
+  const favorites = (db, uid) => collection(db, 'families', 'parent', 'favorites', uid, 'videos');
+  const favorite = (db, uid, id = videoRef(db).id) => doc(favorites(db, uid), id);
+  await assertSucceeds(setDoc(favorite(reader, 'child'), { saved: true }));
+  await assertSucceeds(setDoc(favorite(reader, 'child'), { saved: true }));
+  await assertSucceeds(getDocs(favorites(reader, 'child')));
+  await assertFails(getDocs(favorites(adult, 'child')));
+  await assertFails(getDoc(favorite(otherReader, 'child')));
+  await assertFails(deleteDoc(favorite(adult, 'child')));
+  await assertFails(setDoc(favorite(reader, 'other-child'), { saved: true }));
+  await assertFails(setDoc(favorite(reader, 'child', 'missing0000'), { saved: true }));
+  await assertFails(setDoc(favorite(reader, 'child'), { saved: false }));
+  t.assert.equal((await getDocs(favorites(otherReader, 'other-child'))).size, 0);
+  await assertSucceeds(setDoc(favorite(adult, 'parent'), { saved: true }));
+  await assertSucceeds(deleteDoc(favorite(reader, 'child')));
+  t.assert.equal((await getDocs(favorites(reader, 'child'))).size, 0);
+  t.assert.equal((await getDocs(favorites(adult, 'parent'))).size, 1);
 
   const tagRef = db => doc(db, 'families', 'parent', 'categories', 'space');
   await assertFails(setDoc(tagRef(reader), { name: 'Космос', active: true }));
@@ -110,5 +139,8 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   await assertFails(enroll(otherReader, 'other-child', thirdCode));
   await assertSucceeds(updateDoc(doc(adult, 'families', 'parent'), { epoch: 2 }));
   await assertFails(getDoc(videoRef(reader)));
+  await assertFails(updateDoc(videoRef(reader), { viewCount: increment(1) }));
+  await assertFails(getDocs(favorites(reader, 'child')));
+  await assertFails(setDoc(favorite(reader, 'child'), { saved: true }));
   await assertSucceeds(getDoc(videoRef(adult)));
 });

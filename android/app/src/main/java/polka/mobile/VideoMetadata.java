@@ -46,7 +46,7 @@ final class VideoMetadata {
     private record Topic(String names, String keywords) {}
     private record Suggestion(String id, int score) {}
 
-    // Same name aliases and keywords as the web catalog. Custom topics also match by name.
+    // Custom topics also match by name.
     private static final List<Topic> TOPICS = Arrays.asList(
         new Topic("наука|научное|познавательное|science", "науч*|физик*|хими*|математ*|эксперимент*|исследован*|астроном*|электрич*|молекул*|атом*|планет*|космос|космич*|science|physics|chemistry|math*|experiment*|space"),
         new Topic("природа|nature", "природ*|животн*|звер*|птиц*|насеком*|динозавр*|лес|океан*|морск*|растени*|вулкан*|nature|animal*|wildlife|dinosaur*"),

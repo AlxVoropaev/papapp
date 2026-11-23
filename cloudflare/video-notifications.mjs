@@ -24,7 +24,7 @@ async function googleAccessToken(secret, firebaseProject) {
   const assertion = header + '.' + claims;
   const signature = new Uint8Array(await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, encoder.encode(assertion)));
   const response = await fetch(endpoint, {
-    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(4000),
+    method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(4000),
     body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
       assertion: assertion + '.' + base64url(signature) })
   });
@@ -37,7 +37,7 @@ async function googleAccessToken(secret, firebaseProject) {
 async function deliver(project, bearer, token, data, ttlSeconds) {
   try {
     const result = await fetch('https://fcm.googleapis.com/v1/projects/' + project + '/messages:send', {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000),
+      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(5000),
       headers: { Authorization: 'Bearer ' + bearer, 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: {
         token, data, android: { priority: 'HIGH', ttl: ttlSeconds + 's', restricted_package_name: 'polka.mobile' }

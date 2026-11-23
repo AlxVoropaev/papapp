@@ -360,7 +360,7 @@ async function pushRequest(request, register, env, fetcher) {
   const base = 'https://firestore.googleapis.com/v1/projects/' + env.FIREBASE_PROJECT_ID + '/databases/(default)/documents/';
   const read = async (path, allowMissing = false) => {
     const response = await fetcher(base + path, {
-      headers: { Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(5000)
+      headers: { Authorization: 'Bearer ' + token }, redirect: 'manual', signal: AbortSignal.timeout(5000)
     });
     if (response.ok) return boundedJson(response);
     await response.body?.cancel();

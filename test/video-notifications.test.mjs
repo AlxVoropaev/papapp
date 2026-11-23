@@ -29,7 +29,8 @@ test('push routes trust the Firestore-verified family, epoch and video content',
       })
     }
   };
-  const worker = createWorker({ fetcher: async (url, { headers }) => {
+  const worker = createWorker({ fetcher: async (url, { headers, redirect }) => {
+    assert.equal(redirect, 'manual');
     const token = headers.Authorization?.split(' ')[1];
     const path = url.split('/documents/')[1];
     if (path === 'children/child' && token === child) {
@@ -89,6 +90,7 @@ test('delivery retries only failed targets and skips devices after revocation', 
   });
   const attempts = [];
   t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(options.redirect, 'manual');
     if (url === 'https://oauth2.googleapis.com/token') {
       assert.match(options.body.get('assertion'), /^[\w-]+\.[\w-]+\.[\w-]+$/);
       return Response.json({ access_token: 'test-authorization-token', expires_in: 3600 });

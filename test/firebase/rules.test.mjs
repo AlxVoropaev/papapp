@@ -114,6 +114,27 @@ test('only the parent can edit the shelf and a child needs a fresh invitation', 
   const parentToken = createMockUserToken({
     sub: 'parent', iat: Math.floor(Date.now() / 1000), firebase: { sign_in_provider: 'password' }
   }, project);
+  // The parent forwards the commit's update time so the Worker can identify the exact creation.
+  const pushVideoPath = documents + '/families/parent/videos/aBcDeFgHiJ4';
+  const parentHeaders = { Authorization: 'Bearer ' + parentToken, 'Content-Type': 'application/json' };
+  const rest = 'http://127.0.0.1:8089/v1/';
+  const inserted = await fetch(rest + documents + ':commit', {
+    method: 'POST', headers: parentHeaders,
+    body: JSON.stringify({ writes: [{
+      update: { name: pushVideoPath, fields: {
+        title: { stringValue: 'Push test video' }, category: { stringValue: 'Наука' }, note: { stringValue: '' }
+      } },
+      currentDocument: { exists: false },
+      updateTransforms: [{ fieldPath: 'created', setToServerValue: 'REQUEST_TIME' }]
+    }] })
+  });
+  const commit = await inserted.json();
+  t.assert.equal(inserted.status, 200, JSON.stringify(commit));
+  const saved = await fetch(rest + pushVideoPath, { headers: parentHeaders });
+  const savedVideo = await saved.json();
+  t.assert.equal(saved.status, 200, JSON.stringify(savedVideo));
+  t.assert.equal(savedVideo.createTime, commit.writeResults[0].updateTime);
+
   const bearer = { Authorization: 'Bearer ' + childToken, 'Content-Type': 'application/json' };
   function countView() {
     return fetch('http://127.0.0.1:8089/v1/' + documents + ':commit', {

@@ -54,7 +54,7 @@ final class ApkUpdates {
 
     static void configure(Context context, URI endpoint) {
         String manifest = context.getString(R.string.apk_update_manifest);
-        if (manifest.isEmpty()) {
+        if (context.getResources().getBoolean(R.bool.use_local_update_manifest)) {
             if (endpoint == null) return;
             manifest = endpoint.resolve("android/latest.json").toString();
         }

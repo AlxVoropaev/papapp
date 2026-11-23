@@ -6,6 +6,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.URI;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Arrays;
@@ -27,10 +28,26 @@ final class CatalogBackend {
     private static final String INVALID_CODE = "Код недействителен. Проверьте его или попросите новый.";
 
     private final FirebaseRest firebase;
+    private final Context context;
     private final SecureRandom random = new SecureRandom();
     private String family;
 
-    CatalogBackend(Context context, String origin) {
+    private static URI activeEndpoint;
+    private static CatalogBackend activeBackend;
+
+    static synchronized CatalogBackend forEndpoint(Context context, URI endpoint) {
+        if (!"https".equals(endpoint.getScheme()) || endpoint.getPort() != -1
+                || !endpoint.getHost().toLowerCase(Locale.ROOT).endsWith(".web.app")) return null;
+        // Share the Firebase session and token refresh between the activity and the background job.
+        if (!endpoint.equals(activeEndpoint)) {
+            activeEndpoint = endpoint;
+            activeBackend = new CatalogBackend(context.getApplicationContext(), endpoint.toString());
+        }
+        return activeBackend;
+    }
+
+    private CatalogBackend(Context context, String origin) {
+        this.context = context;
         firebase = new FirebaseRest(context, origin);
     }
 
@@ -54,6 +71,25 @@ final class CatalogBackend {
         }
     }
 
+    synchronized void registerVideoNotifications(NewVideoNotifications.Shelf expected, String token) throws Exception {
+        var user = firebase.user();
+        if (user == null || !user.anonymous || !expected.uid().equals(user.uid)) {
+            throw new Failure(401, "Подключите полку снова.");
+        }
+        writeVideoNotificationRegistration(token);
+    }
+
+    private void writeVideoNotificationRegistration(String token) throws Exception {
+        firebase.push("register", json("token", token == null ? JSONObject.NULL : token));
+    }
+
+    synchronized boolean sendVideoNotification(String expectedFamily, String id, String created) throws Exception {
+        var user = firebase.user();
+        if (user == null || user.anonymous || !user.uid.equals(expectedFamily)) return false;
+        firebase.push("video", json("id", id, "created", created));
+        return true;
+    }
+
     private JSONObject dispatch(String path, String method, JSONObject data) throws Exception {
         switch (method + " " + path) {
             case "GET session":
@@ -74,6 +110,15 @@ final class CatalogBackend {
             case "POST join":
                 return join(data.optString("code"));
             case "POST logout":
+                var signedIn = firebase.user();
+                if (signedIn != null && signedIn.anonymous && firebase.shortCodes()
+                        && NewVideoNotifications.hasRegistration(context, signedIn.uid)) {
+                    try {
+                        writeVideoNotificationRegistration(null);
+                    } catch (Exception ignored) {
+                        // Local sign-out still disables notifications if the server is unreachable.
+                    }
+                }
                 firebase.signOut();
                 family = null;
                 return ok();
@@ -193,7 +238,8 @@ final class CatalogBackend {
         FirebaseRest.Document shelf = firebase.get("families/" + candidate);
         if (shelf == null) throw new Failure(401, "Полка ещё не создана.");
         family = candidate;
-        return json("family", family, "name", shelf.fields.getString("name"), "role", user.anonymous ? "child" : "parent");
+        return json("family", family, "name", shelf.fields.getString("name"),
+            "role", user.anonymous ? "child" : "parent", "uid", user.uid);
     }
 
     private JSONObject createShelf(JSONObject data) throws Exception {
@@ -409,7 +455,13 @@ final class CatalogBackend {
         JSONObject video = json("title", title, "categories", tags, "category", tags.optString(0, OTHER),
                 "note", boundedText(data, "note", 240));
         try {
-            firebase.commit(firebase.write(path, video, json("exists", !create), !create, create ? "created" : null));
+            var result = firebase.commit(firebase.write(path, video,
+                json("exists", !create), !create, create ? "created" : null));
+            if (create && firebase.shortCodes()) {
+                var writes = result.optJSONArray("writeResults");
+                var write = writes == null ? null : writes.optJSONObject(0);
+                if (write != null) NewVideoNotifications.videoSaved(context, this, family, id, write.optString("updateTime"));
+            }
         } catch (FirebaseRest.RemoteFailure error) {
             if (create && error.conflict()) throw new Failure(409, "Это видео уже есть на полке.");
             if (!create && (error.status == 404 || error.conflict())) throw new Failure(404, "Видео не найдено.");

@@ -5,17 +5,27 @@ plugins {
 def localDebugKeystore = rootProject.file('../.tooling/local-debug.keystore')
 def appVersion = new Properties()
 rootProject.file('version.properties').withInputStream { appVersion.load(it) }
+def buildEndpoint = providers.environmentVariable('POLKA_BUILD_ENDPOINT')
 
 android {
     namespace 'polka.mobile'
     compileSdk 35
+    buildToolsVersion '35.0.0'
 
     defaultConfig {
         applicationId 'polka.mobile'
         minSdk 26
-        targetSdk 35
+        targetSdk Integer.parseInt(System.getenv('POLKA_TEST_TARGET_SDK') ?: '35')
         versionCode Integer.parseInt(System.getenv('POLKA_VERSION_CODE') ?: appVersion.getProperty('versionCode'))
         versionName System.getenv('POLKA_VERSION_NAME') ?: appVersion.getProperty('versionName')
+        resValue 'string', 'default_endpoint', buildEndpoint.getOrElse('https://papina-polka-bec464.web.app')
+        resValue 'bool', 'use_local_update_manifest', System.getenv('POLKA_TEST_LOCAL_UPDATES') == '1' ? 'true' : 'false'
+    }
+
+    buildTypes {
+        release {
+            if (localDebugKeystore.isFile()) signingConfig signingConfigs.debug
+        }
     }
 
     signingConfigs {
@@ -33,4 +43,8 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation 'com.google.firebase:firebase-messaging:25.0.1'
 }

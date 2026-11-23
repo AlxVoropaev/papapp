@@ -68,7 +68,15 @@ final class FirebaseRest {
     }
 
     JSONObject pairing(String operation, JSONObject data, boolean authorize) throws Exception {
-        URI url = URI.create(pairingServer + "/pairing/" + operation);
+        return worker("/pairing/" + operation, data, authorize);
+    }
+
+    JSONObject push(String operation, JSONObject data) throws Exception {
+        return worker("/push/" + operation, data, true);
+    }
+
+    private JSONObject worker(String path, JSONObject data, boolean authorize) throws Exception {
+        URI url = URI.create(pairingServer + path);
         String body = data.toString();
         String bearer = authorize ? idToken() : null;
         return WorkerDns.request(url, connection ->
@@ -143,10 +151,10 @@ final class FirebaseRest {
         return result;
     }
 
-    void commit(JSONObject... writes) throws Exception {
+    JSONObject commit(JSONObject... writes) throws Exception {
         JSONArray operations = new JSONArray();
         for (JSONObject write : writes) operations.put(write);
-        firestore(":commit", "POST", json("writes", operations));
+        return firestore(":commit", "POST", json("writes", operations));
     }
 
     JSONObject write(String path, JSONObject fields, JSONObject condition, boolean patch, String serverTimestamp) throws Exception {

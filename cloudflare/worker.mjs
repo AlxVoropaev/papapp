@@ -1,5 +1,6 @@
 import { categoryList } from '../server/catalog.mjs';
 import { applyChannelState, channelAvatarIds, channelIdPattern, uploadsIdPattern, youtubeChannel, youtubeChannelAvatars, youtubeChannelPage, normalizeYoutubeTitle, youtubeOEmbedUrl, youtubePrivacyOEmbedUrl, youtubePlaylist, YoutubePlaylistError } from '../server/youtube.mjs';
+export { VideoPush } from './video-notifications.mjs';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MODEL = 'openrouter/free';
@@ -350,6 +351,50 @@ async function pairing(request, issue, env, fetcher) {
   return codes.fetch('https://pairing/request', { method: 'POST', body: JSON.stringify(input) });
 }
 
+async function pushRequest(request, register, env, fetcher) {
+  if (!env.VIDEO_PUSH || !env.FCM_SERVICE_ACCOUNT) throw new HttpError(503, 'Push-уведомления пока недоступны.');
+  let input;
+  try { input = await boundedJson(request, 8192); } catch { throw new HttpError(400, 'Некорректный запрос.'); }
+  const token = request.headers.get('Authorization')?.match(/^Bearer (.+)$/)?.[1];
+  const uid = parseIdentity(token, env.FIREBASE_PROJECT_ID, Date.now(), register ? 'anonymous' : 'password');
+  const base = 'https://firestore.googleapis.com/v1/projects/' + env.FIREBASE_PROJECT_ID + '/databases/(default)/documents/';
+  const read = async (path, allowMissing = false) => {
+    const response = await fetcher(base + path, {
+      headers: { Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(5000)
+    });
+    if (response.ok) return boundedJson(response);
+    await response.body?.cancel();
+    if (allowMissing && response.status === 404) return null;
+    throw new HttpError([401, 403, 404].includes(response.status) ? 403 : 503, 'Не удалось подтвердить доступ к полке.');
+  };
+  let family = uid;
+  let operation;
+  if (register) {
+    if (input?.token !== null && (typeof input?.token !== 'string' || !/^[!-~]{20,4096}$/.test(input.token))) {
+      throw new HttpError(400, 'Некорректный ключ устройства.');
+    }
+    family = (await read('children/' + uid)).fields?.family?.stringValue;
+    if (!/^[\w-]{1,128}$/.test(family ?? '')) throw new HttpError(403, 'Подключите полку снова.');
+    operation = { action: 'register', uid, token: input.token };
+  } else {
+    if (typeof input?.id !== 'string' || !/^[A-Za-z0-9_-]{11}$/.test(input.id)
+        || typeof input.created !== 'string' || !Number.isFinite(Date.parse(input.created))) {
+      throw new HttpError(400, 'Некорректное видео.');
+    }
+    const video = await read('families/' + family + '/videos/' + input.id, true);
+    const created = Date.parse(video?.createTime);
+    if (!Number.isFinite(created) || created !== Date.parse(input.created)) return Response.json({ ok: true });
+    const title = video.fields?.title?.stringValue;
+    if (typeof title !== 'string' || !title.trim() || title.length > 320) return Response.json({ ok: true });
+    operation = { action: 'send', created, family, title, event: input.id + ':' + video.createTime };
+  }
+  const shelf = await read('families/' + family);
+  const epoch = Number(shelf.fields?.epoch?.integerValue);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) throw new HttpError(403, 'Подключите полку снова.');
+  const deviceStore = env.VIDEO_PUSH.get(env.VIDEO_PUSH.idFromName(family));
+  return deviceStore.fetch('https://push/operation', { method: 'POST', body: JSON.stringify({ ...operation, epoch }) });
+}
+
 export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
   return {
     async fetch(request, env, ctx) {
@@ -370,13 +415,23 @@ export function createWorker({ fetcher = fetch, cache, now = Date.now } = {}) {
         }
       }
       const pairingRequest = url.pathname === '/pairing/issue' || url.pathname === '/pairing/resolve';
+      const push = url.pathname === '/push/register' || url.pathname === '/push/video';
       const playlistRequest = url.pathname === '/playlist';
       const channelRequest = ['/channels/resolve', '/channels/videos', '/channels/avatars'].includes(url.pathname);
-      if (url.pathname !== '/suggest' && !pairingRequest && !playlistRequest && !channelRequest) return json({ error: 'Не найдено.' }, 404);
+      if (url.pathname !== '/suggest' && !pairingRequest && !push && !playlistRequest && !channelRequest) return json({ error: 'Не найдено.' }, 404);
       if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: {
         ...cors, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '3600'
       } });
       if (request.method !== 'POST') return json({ error: 'Нужен POST.' }, 405);
+      if (push) {
+        try {
+          const result = await pushRequest(request, url.pathname === '/push/register', env, fetcher);
+          return json(await result.json(), result.status);
+        } catch (error) {
+          return json({ error: error instanceof HttpError ? error.message : 'Push-уведомления пока недоступны.' },
+            error instanceof HttpError ? error.status : 503);
+        }
+      }
       if (pairingRequest) {
         try {
           const result = await pairing(request, url.pathname === '/pairing/issue', env, fetcher);

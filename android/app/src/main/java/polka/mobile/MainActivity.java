@@ -1,11 +1,13 @@
 package polka.mobile;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -16,6 +18,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.Html;
 import android.text.InputFilter;
@@ -70,6 +73,7 @@ public final class MainActivity extends Activity {
     private static final String CHANNELS = "@channels";
     private static final String OTHER = "Другое";
     private static final long REFRESH_MS = 5 * 60 * 1000L;
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 1;
     private static final int CHANNEL_AVATAR_BATCH_SIZE = 20;
     private static final long CHANNEL_AVATAR_RETRY_MS = 60_000L;
 
@@ -170,15 +174,12 @@ public final class MainActivity extends Activity {
 
     private void connect(URI endpoint) {
         this.endpoint = endpoint;
-        var preferences = getPreferences(MODE_PRIVATE);
-        String host = endpoint.getHost().toLowerCase(java.util.Locale.ROOT);
-        if (host.endsWith(".web.app") && endpoint.getPort() == -1 && "https".equals(endpoint.getScheme())) {
-            cloudBackend = new CatalogBackend(this, endpoint.toString());
-            localBackend = null;
-        } else {
-            cloudBackend = null;
-            localBackend = new LocalCatalog(endpoint, preferences);
+        var notificationShelf = NewVideoNotifications.shelf(this);
+        if (notificationShelf != null && !endpoint.equals(notificationShelf.endpoint())) {
+            NewVideoNotifications.setShelf(this, null);
         }
+        cloudBackend = CatalogBackend.forEndpoint(this, endpoint);
+        localBackend = cloudBackend == null ? new LocalCatalog(endpoint, getPreferences(MODE_PRIVATE)) : null;
         ApkUpdates.configure(this, endpoint);
         loadSession();
     }
@@ -208,8 +209,10 @@ public final class MainActivity extends Activity {
     private void loadSession() {
         resetBody();
         screenPanel("Видео от папы", "Открываем полку…");
-        runBusy(() -> request("session", "GET", null), this::openSession,
-            error -> showWelcome(unauthorized(error) ? "" : message(error)));
+        runBusy(() -> request("session", "GET", null), this::openSession, error -> {
+            if (unauthorized(error)) NewVideoNotifications.setShelf(this, null);
+            showWelcome(unauthorized(error) ? "" : message(error));
+        });
     }
 
     private void showWelcome(String problem) {
@@ -285,6 +288,13 @@ public final class MainActivity extends Activity {
 
     private void openSession(JSONObject next) {
         session = next;
+        if ("child".equals(next.optString("role")) && NewVideoNotifications.supports(this, endpoint)) {
+            NewVideoNotifications.setShelf(this, new NewVideoNotifications.Shelf(endpoint,
+                next.optString("family"), next.optString("uid")));
+            NewVideoNotifications.createChannel(this);
+            NewVideoNotifications.syncRegistration(this);
+        } else NewVideoNotifications.setShelf(this, null);
+        retryVideoNotifications();
         videos = new JSONArray();
         categories = new JSONArray();
         channels = new JSONArray();
@@ -319,6 +329,7 @@ public final class MainActivity extends Activity {
                 closeDialog();
                 playback.close();
                 session = null;
+                NewVideoNotifications.setShelf(this, null);
                 showWelcome("");
                 toast("Подключите полку снова");
                 return;
@@ -331,6 +342,9 @@ public final class MainActivity extends Activity {
                 }
             } else {
                 JSONArray nextVideos = array(result, "videos");
+                if (!parent() && NewVideoNotifications.supports(this, endpoint)) {
+                    if (resumed) askForVideoNotificationPermission();
+                }
                 JSONArray nextCategories = array(result, "categories");
                 JSONArray nextChannels = array(result, "channels");
                 JSONArray favoriteIds = array(result, "favorites");
@@ -1442,14 +1456,44 @@ public final class MainActivity extends Activity {
             panel.addView(button("Подключить устройство", true, this::pairDevice));
             panel.addView(button("Темы видео", false, this::manageCategories));
             panel.addView(button("Отключить детские устройства", false, this::disconnectDevices));
+        } else if (NewVideoNotifications.supports(this, endpoint)) {
+            panel.addView(button("Уведомления о новых видео", false, this::videoNotificationSettings));
         }
         var current = showForm("Настройки", panel, "Выйти", (owner, error) ->
             submit(owner, error, () -> request("logout", "POST", null), result -> {
                 closeDialog();
                 session = null;
+                NewVideoNotifications.setShelf(this, null);
                 showWelcome("");
             }));
         updateControls.check(current);
+    }
+
+    private void askForVideoNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33 || dialog != null || playback.isOpen()) return;
+        var preferences = NewVideoNotifications.preferences(this);
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                && !preferences.getBoolean("permissionAsked", false)) {
+            preferences.edit().putBoolean("permissionAsked", true).apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST);
+        }
+    }
+
+    private void videoNotificationSettings() {
+        startActivity(new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+            .putExtra(Settings.EXTRA_CHANNEL_ID, NewVideoNotifications.CHANNEL_ID));
+    }
+
+    private void retryVideoNotifications() {
+        if (parent() && NewVideoNotifications.supports(this, endpoint)) {
+            NewVideoNotifications.flush(this, cloudBackend, session.optString("family"));
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) NewVideoNotifications.syncRegistration(this);
     }
 
     private final class UpdateSettings {
@@ -1850,6 +1894,20 @@ public final class MainActivity extends Activity {
     @Override public void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         apkUpdates.cancelPreparation();
+        if (NewVideoNotifications.OPEN_SHELF.equals(intent.getAction())) {
+            if (session != null && !parent()) {
+                closeDialog();
+                playback.close();
+                channelFeed = null;
+                showFavorites = false;
+                filter = null;
+                list = null;
+                categoryScrollX = 0;
+                renderLibrary();
+                refresh();
+            }
+            return;
+        }
         captureShare(intent);
         if (session == null && !busy && dialog == null && (cloudBackend != null || localBackend != null)) {
             showWelcome("");
@@ -1908,6 +1966,8 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         resumed = true;
+        NewVideoNotifications.syncRegistration(this);
+        retryVideoNotifications();
         playback.resume();
         apkUpdates.resume();
         deliverShare();

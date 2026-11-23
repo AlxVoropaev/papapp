@@ -22,6 +22,10 @@
       {
         "name": "PAIRING",
         "class_name": "PairingCodes"
+      },
+      {
+        "name": "VIDEO_PUSH",
+        "class_name": "VideoPush"
       }
     ]
   },
@@ -35,6 +39,10 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["PairingCodes"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["VideoPush"]
     }
   ],
   "account_id": "eb70e1dbf84038b2208cf9a4f9b306eb"

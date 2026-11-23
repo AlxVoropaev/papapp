@@ -3,4 +3,8 @@
     <string name="pairing_server" translatable="false">https://papina-polka-tags.alx-voropaev.workers.dev</string>
     <string name="firebase_project_id" translatable="false">papina-polka-bec464</string>
     <string name="firebase_api_key" translatable="false">AIzaSyBLlV57jO7WMfM9heOBRT9VpMWZKx5kV9o</string>
+    <string name="google_app_id" translatable="false">1:454570205603:android:729514163c24e23dca7a16</string>
+    <string name="gcm_defaultSenderId" translatable="false">454570205603</string>
+    <string name="project_id" translatable="false">@string/firebase_project_id</string>
+    <string name="google_api_key" translatable="false">AIzaSyCyaUX8Maff5N1LfWRqHb7MgKo9Jgy2D9c</string>
 </resources>
